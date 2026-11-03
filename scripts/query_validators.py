@@ -34,3 +34,4 @@ for cid in ['Agave', 'JitoLabs', 'Firedancer', 'HarmonicFiredancer', 'AgaveBam',
         print(f"--- {cid} ---")
         for val in top:
             print(f"  Node: {val['node']}, Stake: {val['stake']:,.0f} SOL, Ver: {val['version']}, TPU: {val['tpuQuic']}")
+

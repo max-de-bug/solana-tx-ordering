@@ -44,3 +44,4 @@ ENV SPEND_CAP_SOL="0.05"
 
 ENTRYPOINT ["solana-validator-ordering"]
 CMD ["--dry-run", "--serve-dashboard", "--port", "1995"]
+

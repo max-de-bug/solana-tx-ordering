@@ -53,3 +53,4 @@ services:
     command: ["--live", "--spend-cap-sol", "0.05", "--serve-dashboard", "--port", "1995"]
     profiles:
       - live
+
