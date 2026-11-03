@@ -1,0 +1,55 @@
+services:
+  # 1. Default Dry-Run Service (Zero-SOL spend, completely safe, reproducible in 1 command)
+  validator-experiment:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: solana-validator-ordering
+    ports:
+      - "1995:1995"
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+      # Secure read-only keypair mount (keys are NEVER in repository or docker image)
+      - ./keys:/keys:ro
+    environment:
+      - SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
+      - SPEND_CAP_SOL=${SPEND_CAP_SOL:-0.05}
+      - PORT=1995
+    command: ["--dry-run", "--serve-dashboard", "--port", "1995"]
+    restart: "no"
+
+  # 2. Analyze-Only Service (Instantly re-evaluates raw Mainnet JSON logs without RPC queries)
+  analyzer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: solana-validator-analyzer
+    ports:
+      - "1996:1995"
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+    command: ["--analyze-only", "--serve-dashboard", "--port", "1995"]
+    profiles:
+      - analyze
+
+  # 3. Live Sending Service (EXPLICIT OPT-IN ONLY - Requires funded keypair in ./keys/id.json)
+  live-experiment:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: solana-validator-live
+    ports:
+      - "1997:1995"
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+      - ./keys:/keys:ro
+    environment:
+      - SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
+      - SOLANA_KEYPAIR_PATH=/keys/id.json
+      - SPEND_CAP_SOL=${SPEND_CAP_SOL:-0.05}
+    command: ["--live", "--spend-cap-sol", "0.05", "--serve-dashboard", "--port", "1995"]
+    profiles:
+      - live
