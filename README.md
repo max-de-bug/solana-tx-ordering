@@ -45,7 +45,7 @@ Summary of empirical measurements from live bursts on Solana Mainnet-Beta:
 
 ---
 
-## Experiment Design & Methodology
+## Experiment Design: Why This Design & Pipeline Architecture
 
 ```
 +-----------------------------------------------------------------------------------+
@@ -78,7 +78,14 @@ Summary of empirical measurements from live bursts on Solana Mainnet-Beta:
 +-----------------------------------------------------------------------------------+
 ```
 
-### Key Considerations Addressed:
+### Why This Design
+To empirically isolate transaction ordering rules without conflating network noise with consensus rules, our architecture was built around four deliberate design choices:
+1. **Leader Window Synchronization**: Rather than broadcasting uncoordinated transactions into the network (which drift across hundreds of random leaders and produce ungeneralizable $N=1$ samples), our architecture synchronizes with the active epoch schedule via `LeaderScheduleManager`, isolating each target validator's specific 4-slot (~1.6s) window to measure 24–32 transactions per leader.
+2. **Multi-Topology Fee Perturbation**: To decisively disentangle pure arrival order (FIFO) from priority fee scheduling, `TxCrafter` generates four distinct burst topologies (Ascending, Descending/Inverted, Alternating, and Uniform). In particular, Descending bursts transmit the lowest fee first and highest fee last; when the highest fee lands earlier in the block, it provides proof that priority fee overrides FIFO arrival.
+3. **Decoupled Account Locks (Independent Fee-Payers)**: In Solana, any transactions declaring the same fee-payer account at index 0 must be serialized by the runtime Account Lock Manager to debit fees. To evaluate pure scheduler queue dynamics without runtime lock masking, our pipeline generates distinct ephemeral fee-payers per transaction.
+4. **Single-Segment JSON-RPC Batching**: Transmitting burst items sequentially over HTTP introduces 5–30ms of client serialization latency. The engine packs burst transactions into a single JSON-RPC 2.0 array payload (`send_transaction_batch`), delivering all burst transactions over a single TCP/TLS segment.
+
+### How This Design Handles "What You Will Have to Account For":
 
 1. **Leader Schedule & Leader Windows**:
    - Solana assigns leader slots in 4-slot increments (approximately 1.6 seconds).
@@ -122,7 +129,7 @@ The measurement pipeline includes a standalone Gnuplot 6.0 plotting driver (`scr
 ![Figure 1: Priority Fee Rate vs Block Percentile Placement](reports/figures/fig1_fee_vs_position.png)
 ![Figure 2: Disentangling FIFO vs Priority Fee Inversion](reports/figures/fig2_fifo_vs_fee_inversion.png)
 
-### Scope Boundaries (What This Experiment Deliberately Does NOT Separate):
+### What This Experiment Deliberately Does NOT Separate (Scope Boundaries):
 1. **Public RPC Transit Latency**: Packets routed through public JSON-RPC nodes experience 5-30ms internet routing jitter before reaching the leader's TPU interface.
 2. **Jito Bundle Private Auctions**: Jito bundles execute through an out-of-band private Block Engine relay. This study analyzes the validator's leader scheduler for standard mempool transactions, not private bundle tips.
 3. **Stake-Weighted QoS (SWQoS)**: High-stake nodes receive preferential QUIC stream allocation during periods of high network saturation.

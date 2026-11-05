@@ -2,7 +2,7 @@
 
 **Solana Mainnet Empirical Research Report**  
 *Measurement Campaign Date:* November 5, 2026 (Post-Alpenglow Upgrade Epoch 1076/1077)  
-*Report Generated:* 2026-11-05T19:53:53.443964+00:00  
+*Report Generated:* 2026-11-05T20:57:49.756066400+00:00  
 *Target Network:* Solana Mainnet-Beta (`https://api.mainnet-beta.solana.com`)  
 
 ---
@@ -42,6 +42,21 @@ We deployed controlled transaction bursts into the leader windows of active Sola
 | `EkvdKhULRvdZ` | Agave (Anza) | `4.4.0` | 4106172 | 3 | 24/24 | 100.0% | **+0.155** | +0.131 | Weak Priority / Channel Jitter (Agave) | **15%** |
 
 *Note: Spearman $\rho_{\text{fee}}$ measures rank correlation between priority fee and block position. Positive values indicate higher fee transactions land earlier in the block. Empirical p-values are calculated via 1,000 Monte Carlo permutations ($p < 0.01$).*
+
+### 2.1 Measurement Dates & Campaign Chronology
+Every transaction burst and block measurement was executed and recorded on **November 5, 2026** during Solana Mainnet-Beta Epoch 1076/1077 (post-Alpenglow upgrade). The exact UTC execution timestamps and target slot windows for every validator measurement are:
+
+| Validator Name | Identity Pubkey | Client Fork | Measurement Date | Time Window (UTC) | Target Slots | Total Confirmed Txs |
+|---|---|---|---|---|---|---|
+| **Agave Node Fd7btg** | `Fd7btgySsrju...` | Agave | 2026-11-05 | 19:03:07 - 19:03:10 | 465703960 - 465703964 | 32 / 32 |
+| **Helius Jito-Solana** | `HEL1USMZKAL2...` | Jito-Solana | 2026-11-05 | 19:09:22 - 19:09:25 | 465704336 - 465704340 | 32 / 32 |
+| **Agave-BAM Node DRpbCB** | `DRpbCBMxVnDK...` | Agave-BAM | 2026-11-05 | 19:14:48 - 19:14:51 | 465704672 - 465704676 | 32 / 32 |
+| **Jito Node E1r4Ps** | `E1r4Psq84tHf...` | Jito-Solana | 2026-11-05 | 19:25:31 - 19:25:34 | 465705692 - 465705696 | 32 / 32 |
+| **Firedancer JUPiTER** | `JUPiTERkf97e...` | Firedancer | 2026-11-05 | 19:30:14 - 19:30:17 | 465705980 - 465705984 | 32 / 32 |
+| **Harmonic Firedancer** | `EvnRmnMrd69k...` | Firedancer | 2026-11-05 | 19:38:55 - 19:38:58 | 465707848 - 465707852 | 32 / 32 |
+| **Agave Node EkvdKh** | `EkvdKhULRvdZ...` | Agave | 2026-11-05 | 19:42:15 - 19:42:18 | 465709388 - 465709392 | 24 / 24 |
+
+*Full nanosecond timestamps (`send_timestamp_ns`) for all 216 individual transactions are logged in `data/measurements.json`.*
 
 ![Figure 3: Empirical Strictness & Correlation Coefficients Across Client Forks](figures/fig3_client_strictness.png)
 *Figure 3: Comparison of Spearman Rank Correlation ($\rho_{\text{fee}}$) and Kendall's Tau ($\tau_{\text{fee}}$) across target validators on Solana Mainnet.*
