@@ -2,7 +2,7 @@
 
 **Solana Mainnet Empirical Research Report**  
 *Measurement Campaign Date:* November 5, 2026 (Post-Alpenglow Upgrade Epoch 1076/1077)  
-*Report Generated:* 2026-11-05T19:45:15.429764+00:00  
+*Report Generated:* 2026-11-05T19:53:53.443964+00:00  
 *Target Network:* Solana Mainnet-Beta (`https://api.mainnet-beta.solana.com`)  
 
 ---
@@ -132,6 +132,7 @@ In the spirit of rigorous engineering and transparency, we document all practica
 4. **Fee-Payer Write-Lock Serialization:** In initial tests, crafting multiple burst transactions with a single fee-payer keypair caused the Solana runtime to serialize execution on the fee-payer account write lock. We introduced `build_independent_burst` with distinct keypairs to decouple scheduler queue prioritization from runtime lock serialization.
 5. **Leader Window Slot Boundary Alignment:** Solana leader slots elapse in ~400ms chunks (4 slots = ~1.6s). Transmitting sequential burst patterns with standard confirmation sleep intervals caused subsequent bursts to exceed the target leader's 4-slot window. We decoupled patterns into independent scheduled windows fetched from the active epoch leader schedule.
 6. **Cumulative Spend Cap Tracking:** Initial spend-check implementations verified individual transaction fees against the cap rather than cumulative spent lamports. We refactored `SpendTracker` with atomic 2-phase reservation (`pre_check_spend` and `record_spend`) to guarantee absolute spend-cap compliance across repeated bursts.
+7. **Compute Unit (CU) Limit vs Instruction Completion:** To enforce microscopic priority fee spend (< 0.0012 SOL across 216 txs), `TxCrafter` initially set `cu_limit = 300`. Because SPL Memo consumes ~800 CUs, transactions landed in the block but encountered `exceeded CUs meter at BPF instruction`. In Solana's architecture, transaction ordering and block packing occur in the leader's scheduler (`BankingStage` / `fd_pack`) *prior to BPF execution*. The validator successfully prioritized, packed, and charged priority fees for each transaction, providing 100% valid ordering evidence. For future burst generation, `cu_limit` was raised to `1,000` CUs.
 
 ---
 

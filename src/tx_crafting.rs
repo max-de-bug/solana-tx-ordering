@@ -93,7 +93,8 @@ impl TxCrafter {
 
         for i in 0..burst_size {
             let priority_fee = fee_tiers[i % fee_tiers.len()];
-            let cu_limit: u32 = 300;
+            // 1,000 CUs provides sufficient budget for SPL Memo (~800 CUs) while keeping lamport spend negligible
+            let cu_limit: u32 = 1_000;
 
             // 1. Compute Budget Instructions
             let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(cu_limit);
@@ -172,7 +173,8 @@ impl TxCrafter {
 
         for (i, payer) in payers.iter().enumerate() {
             let priority_fee = fee_tiers[i % fee_tiers.len()];
-            let cu_limit: u32 = 300;
+            // 1,000 CUs provides sufficient budget for SPL Memo (~800 CUs)
+            let cu_limit: u32 = 1_000;
 
             let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(cu_limit);
             let cu_price_ix = ComputeBudgetInstruction::set_compute_unit_price(priority_fee);
