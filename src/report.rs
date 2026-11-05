@@ -217,15 +217,21 @@ impl ReportGenerator {
 
         md.push_str("---\n\n");
         md.push_str("## 7. Raw Data Verification Guide for Judges\n\n");
-        md.push_str("Judges can verify all claims in this report directly on Solana Mainnet through either our automated script or manual JSON-RPC queries:\n\n");
-        md.push_str("### Automated Verification Script (One Command):\n");
+        md.push_str("Judges can verify all claims in this report directly on Solana Mainnet through three independent verification paths:\n\n");
+        md.push_str("### 1. Real-Time In-Browser Verifier (Zero Wallet Required)\n");
+        md.push_str("Visit the live dashboard at [**https://solana-tx-ordering.vercel.app**](https://solana-tx-ordering.vercel.app) and click **`⚡ Real-Time On-Chain Verifier`**:\n");
+        md.push_str("- Executes live read-only JSON-RPC queries (`getSignatureStatuses`) from your browser to Solana Mainnet.\n");
+        md.push_str("- Requires **zero wallet connection**, extensions, or private keys, adhering to Web3 read-only security practices.\n");
+        md.push_str("- Displays live latency, confirmed slot, and on-chain confirmation status, with direct clickable links to Solana Explorer.\n\n");
+
+        md.push_str("### 2. Automated CLI Verification Script (One Command):\n");
         md.push_str("```bash\n");
         md.push_str("python scripts/verify_claims.py\n");
         md.push_str("```\n");
         md.push_str("*Queries Solana Mainnet for confirmed transactions across all 7 target validators, verifying block slot, index, and spend cap compliance in seconds.*\n\n");
 
         if let Some(first_burst) = all_bursts.first() {
-            md.push_str("### Manual On-Chain Verification Sample:\n");
+            md.push_str("### 3. Manual On-Chain Verification Sample:\n");
             md.push_str("```bash\n");
             md.push_str(&format!("# 1. Verify target block on Solana Mainnet\n"));
             md.push_str(&format!("solana block {} --url https://api.mainnet-beta.solana.com\n\n", first_burst.landed_slot));

@@ -2,7 +2,7 @@
 
 **Solana Mainnet Empirical Research Report**  
 *Measurement Campaign Date:* November 5, 2026 (Post-Alpenglow Upgrade Epoch 1076/1077)  
-*Report Generated:* 2026-11-05T19:41:33.700648700+00:00  
+*Report Generated:* 2026-11-05T19:45:15.429764+00:00  
 *Target Network:* Solana Mainnet-Beta (`https://api.mainnet-beta.solana.com`)  
 
 ---
@@ -137,15 +137,21 @@ In the spirit of rigorous engineering and transparency, we document all practica
 
 ## 7. Raw Data Verification Guide for Judges
 
-Judges can verify all claims in this report directly on Solana Mainnet through either our automated script or manual JSON-RPC queries:
+Judges can verify all claims in this report directly on Solana Mainnet through three independent verification paths:
 
-### Automated Verification Script (One Command):
+### 1. Real-Time In-Browser Verifier (Zero Wallet Required)
+Visit the live dashboard at [**https://solana-tx-ordering.vercel.app**](https://solana-tx-ordering.vercel.app) and click **`⚡ Real-Time On-Chain Verifier`**:
+- Executes live read-only JSON-RPC queries (`getSignatureStatuses`) from your browser to Solana Mainnet.
+- Requires **zero wallet connection**, extensions, or private keys, adhering to Web3 read-only security practices.
+- Displays live latency, confirmed slot, and on-chain confirmation status, with direct clickable links to Solana Explorer.
+
+### 2. Automated CLI Verification Script (One Command):
 ```bash
 python scripts/verify_claims.py
 ```
 *Queries Solana Mainnet for confirmed transactions across all 7 target validators, verifying block slot, index, and spend cap compliance in seconds.*
 
-### Manual On-Chain Verification Sample:
+### 3. Manual On-Chain Verification Sample:
 ```bash
 # 1. Verify target block on Solana Mainnet
 solana block 465703964 --url https://api.mainnet-beta.solana.com

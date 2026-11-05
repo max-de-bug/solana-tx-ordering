@@ -184,22 +184,31 @@ cargo run -- --live --keypair-path ./keys/id.json --spend-cap-sol 0.05 --serve-d
 | **3. Fee-Payer Lock Serialization** | Reusing a single fee-payer account forces runtime lock serialization, artificially masking multi-threaded scheduler queues. | Implements `build_independent_burst` with distinct ephemeral signers, completely isolating scheduler priority queues from account write locks. |
 | **4. Binary Counting vs Non-Parametric Statistics** | Counting trivial 3-item order reversals ($3! = 6$) ignores fee magnitudes and lacks statistical power. | Deploys 8 fee tiers across 5 orders of magnitude (100 to 10M $\mu$L/CU), Spearman $\rho$, Kendall $\tau$, and 1,000-trial Monte Carlo permutation testing ($p < 0.001$). |
 | **5. Client-Side HTTP Serialization Delay** | Sending transactions sequentially over HTTP introduces artificial 5–30ms latency between burst items. | Dispatches burst transactions via single-roundtrip JSON-RPC batching (`send_transaction_batch`) in one TCP segment. |
+| **6. Wallet Friction & Security Skepticism** | Requiring wallet connections to view research introduces phishing/drainer suspicions and breaks mobile/sandbox viewing. | 100% read-only in-browser JSON-RPC queries with zero wallet connection or browser extensions needed. |
 
 ---
 
 ## Raw Data Verification Guide (For Judges)
 
-All 216 confirmed transactions and slot numbers are stored in `data/measurements.json` and `data/analysis.json`. Claims can be verified independently against Solana Mainnet:
+All 216 confirmed transactions and slot numbers are stored in `data/measurements.json` and `data/analysis.json`. Claims can be verified independently through three paths:
 
-### 1. Automated One-Command Verification Script (Recommended)
+### 1. Real-Time In-Browser Verifier (Zero Wallet Required)
 
-Run the automated verification suite to sample all 7 validators and query live Mainnet JSON-RPC:
+Open the live dashboard at [**https://solana-tx-ordering.vercel.app**](https://solana-tx-ordering.vercel.app) and click **`⚡ Real-Time On-Chain Verifier`**:
+- **Zero-Friction Read-Only Queries**: The browser queries Solana Mainnet JSON-RPC (`getSignatureStatuses`) live from the client side.
+- **Zero Wallet Required**: Does not ask for wallet connection, browser extensions, or private keys, adhering strictly to Web3 read-only security best practices.
+- **Direct Explorer Links**: Every validator row in the matrix provides a direct clickable link (`🔗 56aLprvP...`) to view the confirmed transaction on [Solana Explorer](https://explorer.solana.com).
+- **Live Confirmation Progress**: Watch the real-time latency (ms), landing slot, and confirmation status update live in the browser.
+
+### 2. Automated One-Command Verification Script (CLI)
+
+Run the automated verification suite to sample all 7 validators and query live Mainnet JSON-RPC from the terminal:
 
 ```bash
 python scripts/verify_claims.py
 ```
 
-### 2. Manual On-Chain Verification via Solana CLI / curl
+### 3. Manual On-Chain Verification via Solana CLI / curl
 
 ```bash
 # 1. Query confirmed block on Solana Mainnet
@@ -222,6 +231,8 @@ curl -s -X POST -H "Content-Type: application/json" \
 ├── docker-compose.yml       # Reproducible profiles (dry-run, analyzer, live)
 ├── .gitignore               # Private key (*.json, id.json) and secret exclusions
 ├── README.md                # Systems engineering documentation & methodology
+├── api/
+│   └── verify.js            # Serverless CORS fallback for in-browser real-time verification
 ├── data/
 │   ├── measurements.json    # Complete raw Mainnet measurement dataset (216 txs)
 │   └── analysis.json        # Statistical scores, Spearman rho, Kendall tau
