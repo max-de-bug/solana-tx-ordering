@@ -1,6 +1,5 @@
 # Solana Validator Transaction Ordering Investigation
-> **Superteam Ukraine Bounty Research Project**  
-> Empirical measurement and analysis of transaction ordering mechanisms across validator client software forks on Solana Mainnet-Beta (with Windows 95 style dashboard).
+> Empirical analysis of transaction ordering rules across client forks on Solana Mainnet-Beta.
 
 [![Solana Mainnet](https://img.shields.io/badge/Solana-Mainnet--Beta-9945FF?style=flat&logo=solana)](https://solana.com)
 [![Rust 1.80+](https://img.shields.io/badge/Rust-1.80%2B-orange?style=flat&logo=rust)](https://rust-lang.org)
@@ -132,7 +131,7 @@ The measurement pipeline includes a standalone Gnuplot 6.0 plotting driver (`scr
 
 ## Safety & Spend Cap Architecture
 
-The bounty specifies a budget constraint fitting within approximately 0.05 SOL:
+The experiment enforces a strict budget limit of 0.05 SOL:
 - **Atomic Two-Phase Spend Gate**: `SpendTracker::pre_check_spend` verifies budget limits before dispatch; `record_spend` records confirmed costs.
 - **Compute Unit Optimization**: Transactions request explicit micro-limits (`300 CU`), resulting in fees around `0.000005 - 0.000008 SOL` per transaction.
 - **Actual Experiment Spend**: Total spend across the entire campaign was **0.001175 SOL (2.4% of the 0.05 SOL limit)** across 216 confirmed transactions.
@@ -229,4 +228,4 @@ curl -s -X POST -H "Content-Type: application/json" \
 
 ## License
 
-MIT License. Engineered for the **Superteam Ukraine** Solana Bounty Track.
+MIT License. Open-source research into Solana validator scheduling mechanics.

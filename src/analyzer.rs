@@ -52,6 +52,8 @@ pub struct ValidatorAggregatedResult {
     pub validator_name: String,
     pub client_type: ClientType,
     pub version_string: String,
+    #[serde(default)]
+    pub stake_sol: f64,
     pub total_bursts_analyzed: usize,
     pub total_tx_sent: usize,
     pub total_tx_landed: usize,
@@ -332,20 +334,20 @@ impl Analyzer {
         // Compute strictness dynamically from empirical correlation metrics
         let strictness = ((avg_spearman_fee.max(0.0) * 0.6) + (avg_kendall.max(0.0) * 0.4)).clamp(0.0, 1.0);
 
-        let (rule, desc) = if avg_spearman_fee >= 0.85 {
+        let (rule, desc) = if avg_spearman_fee >= 0.70 {
             (
                 format!("Deterministic Priority Queue ({})", validator.client_type),
                 "Strong deterministic priority ordering: transactions with higher compute unit price almost strictly land earlier in the block, overriding FIFO send order.".to_string(),
             )
-        } else if avg_spearman_fee >= 0.60 {
+        } else if avg_spearman_fee >= 0.40 {
             (
                 format!("Multi-Thread Interleaved Priority ({})", validator.client_type),
                 "Transactions are prioritized by compute unit price within worker channels, but concurrent worker commit cycles cause position interleaving across non-conflicting accounts.".to_string(),
             )
-        } else if avg_spearman_fee >= 0.35 {
+        } else if avg_spearman_fee >= 0.15 {
             (
-                format!("Weak Fee Prioritization ({})", validator.client_type),
-                "Moderate fee correlation observed; network arrival timing and worker dispatch introduce substantial position variance.".to_string(),
+                format!("Weak Priority / Channel Jitter ({})", validator.client_type),
+                "Moderate fee correlation observed; arrival timing and multi-thread channel dispatch create notable positional variance.".to_string(),
             )
         } else if avg_spearman_send >= 0.60 {
             (
@@ -364,6 +366,7 @@ impl Analyzer {
             validator_name: validator.name.clone(),
             client_type: validator.client_type,
             version_string: validator.version_string.clone(),
+            stake_sol: validator.stake_sol,
             total_bursts_analyzed: total_bursts,
             total_tx_sent: total_sent,
             total_tx_landed: total_landed,

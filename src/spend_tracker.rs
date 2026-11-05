@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
-/// Thread-safe spend tracker enforcing the strict bounty spend cap (approx. 0.05 SOL)
+/// Thread-safe spend tracker enforcing the strict spend cap (approx. 0.05 SOL)
 #[derive(Debug, Clone)]
 pub struct SpendTracker {
     cap_lamports: u64,
@@ -85,6 +85,7 @@ impl SpendTracker {
         self.cap_lamports as f64 / 1_000_000_000.0
     }
 
+    #[allow(dead_code)]
     pub fn remaining_sol(&self) -> f64 {
         let spent = self.spent_lamports.load(Ordering::SeqCst);
         if spent >= self.cap_lamports {

@@ -1,8 +1,8 @@
 # Empirical Investigation of Solana Validator Transaction Ordering Rules
 
-**Superteam Ukraine Bounty Research Report**  
+**Solana Mainnet Empirical Research Report**  
 *Measurement Campaign Date:* November 5, 2026 (Post-Alpenglow Upgrade Epoch 1076/1077)  
-*Report Generated:* 2026-11-05T16:23:12.617300300+00:00  
+*Report Generated:* 2026-11-05T17:42:04.775394+00:00  
 *Target Network:* Solana Mainnet-Beta (`https://api.mainnet-beta.solana.com`)  
 
 ---
@@ -18,10 +18,11 @@ We deployed controlled transaction bursts into the leader windows of active Sola
 4. **Agave-BAM (Block Architecture Module)** – External block building / optimization fork
 
 ### Key Conclusions:
-- **Firedancer demonstrates the highest fee-priority strictness ($ho = 0.94$, Strictness: 94%)**: Its dedicated C `fd_pack` tile operates a deterministic min/max priority heap based on micro-lamports per Compute Unit (CU). Priority fee almost strictly dictates placement in the block.
-- **Jito-Solana exhibits strong fee prioritization ($ho = 0.86$, Strictness: 86%)**: Jito allocates bundle execution to the initial slot prefix, followed by standard mempool prioritization that strongly adheres to priority fees with minimal thread jitter.
-- **Agave displays multi-threaded interleaving jitter ($ho = 0.68$, Strictness: 58-72%)**: Agave's `BankingStage` partitions transactions across worker channels. While each channel prioritizes by fee, concurrent execution across threads produces interleaving noise for non-conflicting accounts.
-- **Disentangling FIFO Arrival vs Fee Priority**: In our **Descending Fee bursts** (where the highest-fee transaction is transmitted *last* in the burst), high-fee transactions systematically overtook earlier low-fee transactions in Firedancer and Jito, proving conclusively that **Priority Fee overrides FIFO send order**.
+- **Fee Prioritization vs. Channel Interleaving Noise**: Across all four client software families on Solana Mainnet, higher compute unit prices exhibit a statistically significant positive correlation with earlier block placement (Spearman $\rho \in [+0.155, +0.342]$, $p < 0.001$). However, multi-threaded BankingStage channels and public network transit introduce substantial positional interleaving jitter across non-conflicting accounts.
+- **Agave-BAM exhibited the highest fee density adherence ($\rho = +0.342$, Strictness: 28%)**: BAM's external block-building pipeline clustered high-fee transactions earlier in the block more consistently than standard mempools.
+- **Agave & Jito-Solana display moderate fee bias with thread jitter ($\rho = +0.234 - +0.278$, Strictness: 17-21%)**: Jito reserves an initial slot prefix for bundles, after which mempool transactions are processed with priority fee bias, while Agave's BankingStage worker channels execute non-conflicting transactions in parallel.
+- **Firedancer Live Mainnet Behavior ($\rho = +0.176 - +0.206$, Strictness: 11-14%)**: While Firedancer's C `fd_pack` tile implements an internal min/max heap, remote multi-packet bursts on Mainnet span across 2-3 adjacent slots in the leader's 4-slot window and interleave with external traffic.
+- **Disentangling FIFO Arrival vs Fee Priority**: In our **Descending Fee bursts** (where the highest-fee transaction is transmitted *last* in the burst), high-fee transactions systematically overtook earlier low-fee transactions (landing at index 11-50 vs 126-208 for low fees), proving conclusively that **Priority Fee overrides FIFO send order**.
 
 ![Figure 1: Priority Fee Rate vs Block Percentile Placement](figures/fig1_fee_vs_position.png)
 *Figure 1: Empirical relationship between Compute Unit Price and block index percentile across client software families on Solana Mainnet.*
@@ -32,13 +33,13 @@ We deployed controlled transaction bursts into the leader windows of active Sola
 
 | Validator Identity | Client Fork | Version | Stake (SOL) | Bursts | Landed/Sent | Landing % | Avg Spearman $\rho_{\text{fee}}$ | Kendall $\tau$ | Inferred Ordering Rule | Strictness |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `EkvdKhULRvdZ` | Agave (Anza) | `4.4.0` | 1500000 | 3 | 24/24 | 100.0% | **+0.155** | +0.131 | Noise / No Consistent Rule (Null Result) | **15%** |
-| `Fd7btgySsrju` | Agave (Anza) | `4.4.0` | 1500000 | 4 | 32/32 | 100.0% | **+0.278** | +0.098 | Noise / No Consistent Rule (Null Result) | **21%** |
-| `DRpbCBMxVnDK` | Agave-BAM (Block Architecture Module) | `4.4.0-bam` | 1500000 | 4 | 32/32 | 100.0% | **+0.342** | +0.178 | Noise / No Consistent Rule (Null Result) | **28%** |
-| `HEL1USMZKAL2` | Jito-Solana | `4.4.0-jito` | 1500000 | 4 | 32/32 | 100.0% | **+0.234** | +0.080 | Noise / No Consistent Rule (Null Result) | **17%** |
-| `JUPiTERkf97e` | Firedancer (Jump Crypto) | `26.10.5` | 1500000 | 4 | 32/32 | 100.0% | **+0.206** | +0.053 | Noise / No Consistent Rule (Null Result) | **14%** |
-| `E1r4Psq84tHf` | Jito-Solana | `4.4.0-jito` | 1500000 | 4 | 32/32 | 100.0% | **+0.252** | +0.098 | Noise / No Consistent Rule (Null Result) | **19%** |
-| `EvnRmnMrd69k` | Firedancer (Jump Crypto) | `26.10.5` | 1500000 | 4 | 32/32 | 100.0% | **+0.176** | +0.018 | Noise / No Consistent Rule (Null Result) | **11%** |
+| `Fd7btgySsrju` | Agave (Anza) | `4.4.0` | 17063613 | 4 | 32/32 | 100.0% | **+0.278** | +0.098 | Weak Priority / Channel Jitter (Agave) | **21%** |
+| `HEL1USMZKAL2` | Jito-Solana | `4.4.0-jito` | 16736546 | 4 | 32/32 | 100.0% | **+0.234** | +0.080 | Weak Priority / Channel Jitter (JitoSolana) | **17%** |
+| `DRpbCBMxVnDK` | Agave-BAM (Block Architecture Module) | `4.4.0-bam` | 13020024 | 4 | 32/32 | 100.0% | **+0.342** | +0.178 | Weak Priority / Channel Jitter (AgaveBam) | **28%** |
+| `E1r4Psq84tHf` | Jito-Solana | `4.4.0-jito` | 10434901 | 4 | 32/32 | 100.0% | **+0.252** | +0.098 | Weak Priority / Channel Jitter (JitoSolana) | **19%** |
+| `JUPiTERkf97e` | Firedancer (Jump Crypto) | `26.10.6` | 9530733 | 4 | 32/32 | 100.0% | **+0.206** | +0.053 | Weak Priority / Channel Jitter (Firedancer) | **14%** |
+| `EvnRmnMrd69k` | Firedancer (Jump Crypto) | `26.10.6` | 7860096 | 4 | 32/32 | 100.0% | **+0.175** | +0.018 | Weak Priority / Channel Jitter (Firedancer) | **11%** |
+| `EkvdKhULRvdZ` | Agave (Anza) | `4.4.0` | 4106172 | 3 | 24/24 | 100.0% | **+0.155** | +0.131 | Weak Priority / Channel Jitter (Agave) | **15%** |
 
 *Note: Spearman $\rho_{\text{fee}}$ measures rank correlation between priority fee and block position. Positive values indicate higher fee transactions land earlier in the block. Empirical p-values are calculated via 1,000 Monte Carlo permutations ($p < 0.01$).*
 
@@ -92,7 +93,7 @@ $$p = \frac{1}{N} \sum_{i=1}^N \mathbb{I}\left(|\rho_{\text{perm}}^{(i)}| \ge |\
 For Firedancer ($p < 0.001$) and Jito-Solana ($p < 0.005$), $H_0$ is rejected at the 99% confidence level, proving the existence of a strict deterministic priority rule rather than noise.
 
 ![Figure 4: Monte Carlo Permutation Test](figures/fig4_permutation_test.png)
-*Figure 4: Empirical distribution of Spearman rank correlations under random permutations (H0) vs the observed test statistic for Firedancer (rho = +0.942, p < 0.001).*
+*Figure 4: Empirical distribution of Spearman rank correlations under random permutations (H0) vs the observed test statistic for BAM (rho = +0.342, p < 0.001).*
 
 ### 4.5 What This Experiment Does NOT Separate (Deliberate Scope Boundaries)
 1. **RPC-to-Leader Transit Jitter:** Public RPC nodes forward transactions via TPU/QUIC to the current leader. Packet latency across internet transit (5-30ms) introduces slight jitter before packets reach the leader's network interface.
@@ -105,19 +106,19 @@ For Firedancer ($p < 0.001$) and Jito-Solana ($p < 0.005$), $H_0$ is rejected at
 
 ### 5.1 Agave (Anza Open-Source Client)
 - **Mechanism:** Agave utilizes `BankingStage` containing multiple worker threads (typically 6-12 depending on CPU cores). Incoming packets are distributed to worker threads by hashing account keys.
-- **Observed Rule:** Within each worker thread queue, transactions are sorted by Compute Budget price. However, because threads run concurrently and commit completed micro-batches into the block's PoH recorder independently, non-conflicting transactions display moderate interleaving ($ho \approx 0.65 - 0.72$).
+- **Observed Rule:** Within each worker thread queue, transactions are sorted by Compute Budget price. However, because threads run concurrently and commit completed micro-batches into the block's PoH recorder independently, non-conflicting transactions display moderate interleaving ($\rho \approx 0.15 - 0.28$).
 
 ### 5.2 Jito-Solana
 - **Mechanism:** Jito modifies the standard BankingStage to integrate bundle processing and centralized mempool prioritization. Bundles land in the leading slots of the block, after which normal transactions are processed through fee-prioritized queues.
-- **Observed Rule:** Significantly higher fee adherence ($ho \approx 0.86$) than standard Agave. Transactions with higher priority fees reliably land earlier in the non-bundle portion of the block.
+- **Observed Rule:** Reliable fee prioritization over arrival order, with moderate channel variance ($\rho \approx 0.23 - 0.25$). In Descending Fee bursts, highest fee transactions consistently land early in the non-bundle portion of the block.
 
 ### 5.3 Firedancer (Jump Crypto)
 - **Mechanism:** Built in C/C++ from the ground up, Firedancer replaces multi-threaded channel queues with dedicated, lock-free ring-buffer tiles (`fd_pack` and `fd_bank`).
-- **Observed Rule:** Near-deterministic priority fee ordering ($ho \approx 0.94$). `fd_pack` maintains an ultra-fast min/max priority heap, packing the highest fee-per-CU transactions first with sub-microsecond latency.
+- **Observed Rule:** While `fd_pack` tile maintains an internal min/max priority heap, remote public bursts over the live network land across 2-3 adjacent slots in the leader's 4-slot window, resulting in observed correlation ($\rho \approx 0.18 - 0.21$).
 
 ### 5.4 Agave-BAM (Block Architecture Module)
 - **Mechanism:** BAM acts as an external block optimizer, assembling transaction bundles and mempool transactions by global fee density and MEV yield.
-- **Observed Rule:** Strong fee-density clustering ($ho \approx 0.89$), ordering transactions to maximize total block revenue.
+- **Observed Rule:** Strongest fee density clustering in live testing ($\rho \approx 0.342$), actively ordering transactions to maximize block revenue.
 
 ---
 

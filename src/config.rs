@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "solana-validator-ordering",
-    author = "Superteam Ukraine Bounty Researcher",
+    author = "Solana Validator Research Team",
     version = "1.0.0-win95",
     about = "Measures how Solana validators order transactions within blocks across client forks"
 )]
@@ -82,7 +82,7 @@ impl Config {
             }
             if self.spend_cap_sol > 0.10 {
                 anyhow::bail!(
-                    "SAFETY ERROR: Spend cap ({:.4} SOL) exceeds maximum safe bounty limit (0.10 SOL).",
+                    "SAFETY ERROR: Spend cap ({:.4} SOL) exceeds maximum safe limit (0.10 SOL).",
                     self.spend_cap_sol
                 );
             }

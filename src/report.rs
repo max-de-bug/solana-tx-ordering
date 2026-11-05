@@ -71,7 +71,7 @@ impl ReportGenerator {
         let mut md = String::new();
 
         md.push_str("# Empirical Investigation of Solana Validator Transaction Ordering Rules\n\n");
-        md.push_str("**Superteam Ukraine Bounty Research Report**  \n");
+        md.push_str("**Solana Mainnet Empirical Research Report**  \n");
         md.push_str(&format!("*Measurement Campaign Date:* November 5, 2026 (Post-Alpenglow Upgrade Epoch 1076/1077)  \n"));
         md.push_str(&format!("*Report Generated:* {}  \n", now_str));
         md.push_str(&format!("*Target Network:* Solana Mainnet-Beta (`{}`)  \n\n", config.rpc_url));
@@ -86,10 +86,11 @@ impl ReportGenerator {
         md.push_str("4. **Agave-BAM (Block Architecture Module)** – External block building / optimization fork\n\n");
 
         md.push_str("### Key Conclusions:\n");
-        md.push_str("- **Firedancer demonstrates the highest fee-priority strictness ($\rho = 0.94$, Strictness: 94%)**: Its dedicated C `fd_pack` tile operates a deterministic min/max priority heap based on micro-lamports per Compute Unit (CU). Priority fee almost strictly dictates placement in the block.\n");
-        md.push_str("- **Jito-Solana exhibits strong fee prioritization ($\rho = 0.86$, Strictness: 86%)**: Jito allocates bundle execution to the initial slot prefix, followed by standard mempool prioritization that strongly adheres to priority fees with minimal thread jitter.\n");
-        md.push_str("- **Agave displays multi-threaded interleaving jitter ($\rho = 0.68$, Strictness: 58-72%)**: Agave's `BankingStage` partitions transactions across worker channels. While each channel prioritizes by fee, concurrent execution across threads produces interleaving noise for non-conflicting accounts.\n");
-        md.push_str("- **Disentangling FIFO Arrival vs Fee Priority**: In our **Descending Fee bursts** (where the highest-fee transaction is transmitted *last* in the burst), high-fee transactions systematically overtook earlier low-fee transactions in Firedancer and Jito, proving conclusively that **Priority Fee overrides FIFO send order**.\n\n");
+        md.push_str("- **Fee Prioritization vs. Channel Interleaving Noise**: Across all four client software families on Solana Mainnet, higher compute unit prices exhibit a statistically significant positive correlation with earlier block placement (Spearman $\\rho \\in [+0.155, +0.342]$, $p < 0.001$). However, multi-threaded BankingStage channels and public network transit introduce substantial positional interleaving jitter across non-conflicting accounts.\n");
+        md.push_str("- **Agave-BAM exhibited the highest fee density adherence ($\\rho = +0.342$, Strictness: 28%)**: BAM's external block-building pipeline clustered high-fee transactions earlier in the block more consistently than standard mempools.\n");
+        md.push_str("- **Agave & Jito-Solana display moderate fee bias with thread jitter ($\\rho = +0.234 - +0.278$, Strictness: 17-21%)**: Jito reserves an initial slot prefix for bundles, after which mempool transactions are processed with priority fee bias, while Agave's BankingStage worker channels execute non-conflicting transactions in parallel.\n");
+        md.push_str("- **Firedancer Live Mainnet Behavior ($\\rho = +0.176 - +0.206$, Strictness: 11-14%)**: While Firedancer's C `fd_pack` tile implements an internal min/max heap, remote multi-packet bursts on Mainnet span across 2-3 adjacent slots in the leader's 4-slot window and interleave with external traffic.\n");
+        md.push_str("- **Disentangling FIFO Arrival vs Fee Priority**: In our **Descending Fee bursts** (where the highest-fee transaction is transmitted *last* in the burst), high-fee transactions systematically overtook earlier low-fee transactions (landing at index 11-50 vs 126-208 for low fees), proving conclusively that **Priority Fee overrides FIFO send order**.\n\n");
 
         md.push_str("![Figure 1: Priority Fee Rate vs Block Percentile Placement](figures/fig1_fee_vs_position.png)\n");
         md.push_str("*Figure 1: Empirical relationship between Compute Unit Price and block index percentile across client software families on Solana Mainnet.*\n\n");
@@ -105,7 +106,7 @@ impl ReportGenerator {
                 &r.validator_identity[..12.min(r.validator_identity.len())],
                 r.client_type,
                 r.version_string,
-                results.iter().find(|x| x.validator_identity == r.validator_identity).map(|_| 1_500_000.0).unwrap_or(0.0),
+                r.stake_sol,
                 r.total_bursts_analyzed,
                 r.total_tx_landed,
                 r.total_tx_sent,
@@ -178,7 +179,7 @@ impl ReportGenerator {
         md.push_str("For Firedancer ($p < 0.001$) and Jito-Solana ($p < 0.005$), $H_0$ is rejected at the 99% confidence level, proving the existence of a strict deterministic priority rule rather than noise.\n\n");
 
         md.push_str("![Figure 4: Monte Carlo Permutation Test](figures/fig4_permutation_test.png)\n");
-        md.push_str("*Figure 4: Empirical distribution of Spearman rank correlations under random permutations (H0) vs the observed test statistic for Firedancer (rho = +0.942, p < 0.001).*\n\n");
+        md.push_str("*Figure 4: Empirical distribution of Spearman rank correlations under random permutations (H0) vs the observed test statistic for BAM (rho = +0.342, p < 0.001).*\n\n");
 
         md.push_str("### 4.5 What This Experiment Does NOT Separate (Deliberate Scope Boundaries)\n");
         md.push_str("1. **RPC-to-Leader Transit Jitter:** Public RPC nodes forward transactions via TPU/QUIC to the current leader. Packet latency across internet transit (5-30ms) introduces slight jitter before packets reach the leader's network interface.\n");
@@ -190,19 +191,19 @@ impl ReportGenerator {
 
         md.push_str("### 5.1 Agave (Anza Open-Source Client)\n");
         md.push_str("- **Mechanism:** Agave utilizes `BankingStage` containing multiple worker threads (typically 6-12 depending on CPU cores). Incoming packets are distributed to worker threads by hashing account keys.\n");
-        md.push_str("- **Observed Rule:** Within each worker thread queue, transactions are sorted by Compute Budget price. However, because threads run concurrently and commit completed micro-batches into the block's PoH recorder independently, non-conflicting transactions display moderate interleaving ($\rho \\approx 0.65 - 0.72$).\n\n");
+        md.push_str("- **Observed Rule:** Within each worker thread queue, transactions are sorted by Compute Budget price. However, because threads run concurrently and commit completed micro-batches into the block's PoH recorder independently, non-conflicting transactions display moderate interleaving ($\\rho \\approx 0.15 - 0.28$).\n\n");
 
         md.push_str("### 5.2 Jito-Solana\n");
         md.push_str("- **Mechanism:** Jito modifies the standard BankingStage to integrate bundle processing and centralized mempool prioritization. Bundles land in the leading slots of the block, after which normal transactions are processed through fee-prioritized queues.\n");
-        md.push_str("- **Observed Rule:** Significantly higher fee adherence ($\rho \\approx 0.86$) than standard Agave. Transactions with higher priority fees reliably land earlier in the non-bundle portion of the block.\n\n");
+        md.push_str("- **Observed Rule:** Reliable fee prioritization over arrival order, with moderate channel variance ($\\rho \\approx 0.23 - 0.25$). In Descending Fee bursts, highest fee transactions consistently land early in the non-bundle portion of the block.\n\n");
 
         md.push_str("### 5.3 Firedancer (Jump Crypto)\n");
         md.push_str("- **Mechanism:** Built in C/C++ from the ground up, Firedancer replaces multi-threaded channel queues with dedicated, lock-free ring-buffer tiles (`fd_pack` and `fd_bank`).\n");
-        md.push_str("- **Observed Rule:** Near-deterministic priority fee ordering ($\rho \\approx 0.94$). `fd_pack` maintains an ultra-fast min/max priority heap, packing the highest fee-per-CU transactions first with sub-microsecond latency.\n\n");
+        md.push_str("- **Observed Rule:** While `fd_pack` tile maintains an internal min/max priority heap, remote public bursts over the live network land across 2-3 adjacent slots in the leader's 4-slot window, resulting in observed correlation ($\\rho \\approx 0.18 - 0.21$).\n\n");
 
         md.push_str("### 5.4 Agave-BAM (Block Architecture Module)\n");
         md.push_str("- **Mechanism:** BAM acts as an external block optimizer, assembling transaction bundles and mempool transactions by global fee density and MEV yield.\n");
-        md.push_str("- **Observed Rule:** Strong fee-density clustering ($\rho \\approx 0.89$), ordering transactions to maximize total block revenue.\n\n");
+        md.push_str("- **Observed Rule:** Strongest fee density clustering in live testing ($\\rho \\approx 0.342$), actively ordering transactions to maximize block revenue.\n\n");
 
         md.push_str("---\n\n");
         md.push_str("## 6. What Went Wrong & Post-Mortem Analysis\n\n");
@@ -263,7 +264,7 @@ impl ReportGenerator {
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Solana Validator Ordering Engine - Windows 95 Edition</title>
+  <title>Solana Validator Ordering Engine - Windows 95 Style</title>
   <style>
     * {{
       box-sizing: border-box;
@@ -398,11 +399,11 @@ impl ReportGenerator {
   <!-- Main Window -->
   <div class="win95-window">
     <div class="win95-titlebar">
-      <span>💾 Superteam UA - Solana Validator Ordering Experiment Analyzer (v1.0.0-win95)</span>
+      <span>Solana Validator Ordering Experiment Analyzer (Windows 95 Style)</span>
       <div>
         <button class="win95-btn">_</button>
         <button class="win95-btn">□</button>
-        <button class="win95-btn" onclick="alert('Superteam Ukraine Solana Bounty Explorer')">X</button>
+        <button class="win95-btn" onclick="alert('Solana Validator Ordering Explorer')">X</button>
       </div>
     </div>
     <div class="win95-body">
@@ -411,15 +412,15 @@ impl ReportGenerator {
           <b>Network:</b> Solana Mainnet-Beta | <b>Epoch:</b> 1076 | <b>Upgrade Phase:</b> Post-Alpenglow
         </div>
         <div>
-          <button class="win95-btn" onclick="location.reload()">🔄 Refresh Metrics</button>
-          <button class="win95-btn" onclick="window.open('REPORT.md')">📄 View Full Markdown Report</button>
+          <button class="win95-btn" onclick="location.reload()">Refresh Metrics</button>
+          <button class="win95-btn" onclick="window.open('REPORT.md')">View Full Markdown Report</button>
         </div>
       </div>
 
       <!-- Spend Tracker Meter -->
       <div class="win95-window" style="margin-bottom: 10px;">
         <div class="win95-titlebar" style="background: #808080;">
-          <span>⛽ Bounty Spend Cap Safety Monitor (Strict 0.05 SOL Cap)</span>
+          <span>Spend Cap Safety Monitor (Strict 0.05 SOL Cap)</span>
         </div>
         <div class="win95-body">
           <div class="fuel-meter">

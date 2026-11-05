@@ -479,7 +479,8 @@
         "p_value_send": 0.304,
         "burst_classification": "WEAK FEE-PRIORITY ORDERING"
       }
-    ]
+    ],
+    "stake_sol": 17063613.0
   },
   {
     "validator_identity": "HEL1USMZKAL2odpNBj2oCjffnFGaYwmbGmyewGv1e2TU",
@@ -961,7 +962,8 @@
         "p_value_send": 0.133,
         "burst_classification": "WEAK FEE-PRIORITY ORDERING"
       }
-    ]
+    ],
+    "stake_sol": 16736546.0
   },
   {
     "validator_identity": "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy",
@@ -1443,7 +1445,8 @@
         "p_value_send": 0.158,
         "burst_classification": "WEAK FEE-PRIORITY ORDERING"
       }
-    ]
+    ],
+    "stake_sol": 13020024.0
   },
   {
     "validator_identity": "E1r4Psq84tHfQ6aPTvvDka4U3u8zPVD7gEUrH25RdxHL",
@@ -1925,7 +1928,8 @@
         "p_value_send": 0.362,
         "burst_classification": "WEAK FEE-PRIORITY ORDERING"
       }
-    ]
+    ],
+    "stake_sol": 10434901.0
   },
   {
     "validator_identity": "JUPiTERkf97eKN222JwY7bkpWuJnwqKtT44fsbJfhkr",
@@ -2407,7 +2411,8 @@
         "p_value_send": 0.705,
         "burst_classification": "WEAK FEE-PRIORITY ORDERING"
       }
-    ]
+    ],
+    "stake_sol": 9530733.0
   },
   {
     "validator_identity": "EvnRmnMrd69kFdbLMxWkTn1icZ7DCceRhvmb2SJXqDo4",
@@ -2889,7 +2894,8 @@
         "p_value_send": 0.53,
         "burst_classification": "WEAK FEE-PRIORITY ORDERING"
       }
-    ]
+    ],
+    "stake_sol": 7860096.0
   },
   {
     "validator_identity": "EkvdKhULRvdZq4E3yqj945rXw1yE8s1V8k4e7d5N5e8",
@@ -3255,6 +3261,7 @@
         "p_value_send": 0.769,
         "burst_classification": "MIXED DYNAMICS / MULTI-THREAD JITTER"
       }
-    ]
+    ],
+    "stake_sol": 4106172.0
   }
 ]

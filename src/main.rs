@@ -36,7 +36,7 @@ const WIN95_BANNER: &str = r#"
 ║  ███████║╚██████╔╝███████╗██║  ██║██║ ╚████║██║  ██║    ╚██████╔╝██║  ██║║
 ║  ╚══════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝     ╚═════╝ ╚═╝  ╚═╝║
 ║           SOLANA VALIDATOR TRANSACTION ORDERING ENGINE (WIN95)           ║
-║               Superteam Ukraine Bounty Research Pipeline                 ║
+║           Solana Mainnet Validator Ordering Research Pipeline            ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 "#;
 
@@ -270,7 +270,19 @@ async fn main() -> anyhow::Result<()> {
 fn load_existing_data(
     data_dir: &Path,
 ) -> anyhow::Result<(Vec<ValidatorAggregatedResult>, Vec<BurstAnalysisResult>)> {
+    let analysis_path = data_dir.join("analysis.json");
     let raw_path = data_dir.join("measurements.json");
+
+    if analysis_path.exists() && raw_path.exists() {
+        let content_analysis = fs::read_to_string(&analysis_path)?;
+        let aggregated: Vec<ValidatorAggregatedResult> = serde_json::from_str(&content_analysis)?;
+
+        let content_raw = fs::read_to_string(&raw_path)?;
+        let bursts: Vec<BurstAnalysisResult> = serde_json::from_str(&content_raw)?;
+
+        return Ok((aggregated, bursts));
+    }
+
     if raw_path.exists() {
         let content = fs::read_to_string(&raw_path)?;
         let bursts: Vec<BurstAnalysisResult> = serde_json::from_str(&content)?;

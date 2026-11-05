@@ -336,6 +336,7 @@ def main():
             "validator_name": meta[1],
             "client_type": ctype,
             "version_string": meta[3],
+            "stake_sol": meta[4],
             "total_bursts_analyzed": len(b_list),
             "total_tx_sent": sent,
             "total_tx_landed": landed,

@@ -102,7 +102,7 @@ impl TxCrafter {
             // 2. Unique Memo Instruction (guarantees payload uniqueness against deduplication)
             let send_timestamp_ns = Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
             let memo_text = format!(
-                "superteam-ua:burst={}:seq={}:pfee={}:ts={}",
+                "solana-tx-order:burst={}:seq={}:pfee={}:ts={}",
                 burst_id, i, priority_fee, send_timestamp_ns
             );
 
@@ -179,7 +179,7 @@ impl TxCrafter {
 
             let send_timestamp_ns = Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
             let memo_text = format!(
-                "superteam-ua:burst={}:seq={}:pfee={}:ts={}:independent=true",
+                "solana-tx-order:burst={}:seq={}:pfee={}:ts={}:independent=true",
                 burst_id, i, priority_fee, send_timestamp_ns
             );
 
