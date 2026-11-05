@@ -2,7 +2,7 @@
 
 **Solana Mainnet Empirical Research Report**  
 *Measurement Campaign Date:* November 5, 2026 (Post-Alpenglow Upgrade Epoch 1076/1077)  
-*Report Generated:* 2026-11-05T17:42:04.775394+00:00  
+*Report Generated:* 2026-11-05T17:54:37.785217400+00:00  
 *Target Network:* Solana Mainnet-Beta (`https://api.mainnet-beta.solana.com`)  
 
 ---
@@ -137,9 +137,15 @@ In the spirit of rigorous engineering and transparency, we document all practica
 
 ## 7. Raw Data Verification Guide for Judges
 
-Judges can verify all claims in this report directly on Solana Mainnet using the Solana CLI or curl JSON-RPC:
+Judges can verify all claims in this report directly on Solana Mainnet through either our automated script or manual JSON-RPC queries:
 
-### Sample Verification Command:
+### Automated Verification Script (One Command):
+```bash
+python scripts/verify_claims.py
+```
+*Queries Solana Mainnet for confirmed transactions across all 7 target validators, verifying block slot, index, and spend cap compliance in seconds.*
+
+### Manual On-Chain Verification Sample:
 ```bash
 # 1. Verify target block on Solana Mainnet
 solana block 465703964 --url https://api.mainnet-beta.solana.com

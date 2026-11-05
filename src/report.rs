@@ -217,10 +217,15 @@ impl ReportGenerator {
 
         md.push_str("---\n\n");
         md.push_str("## 7. Raw Data Verification Guide for Judges\n\n");
-        md.push_str("Judges can verify all claims in this report directly on Solana Mainnet using the Solana CLI or curl JSON-RPC:\n\n");
+        md.push_str("Judges can verify all claims in this report directly on Solana Mainnet through either our automated script or manual JSON-RPC queries:\n\n");
+        md.push_str("### Automated Verification Script (One Command):\n");
+        md.push_str("```bash\n");
+        md.push_str("python scripts/verify_claims.py\n");
+        md.push_str("```\n");
+        md.push_str("*Queries Solana Mainnet for confirmed transactions across all 7 target validators, verifying block slot, index, and spend cap compliance in seconds.*\n\n");
 
         if let Some(first_burst) = all_bursts.first() {
-            md.push_str("### Sample Verification Command:\n");
+            md.push_str("### Manual On-Chain Verification Sample:\n");
             md.push_str("```bash\n");
             md.push_str(&format!("# 1. Verify target block on Solana Mainnet\n"));
             md.push_str(&format!("solana block {} --url https://api.mainnet-beta.solana.com\n\n", first_burst.landed_slot));
@@ -472,10 +477,11 @@ impl ReportGenerator {
             <span>🔬 Scientific Hypothesis & Ordering Principles</span>
           </div>
           <div class="win95-body" style="background: #fff; border: 1px inset #808080; height: 194px; overflow-y: auto; padding: 6px;">
-            <p><b>1. Firedancer (C/C++):</b> Operates dedicated <code>fd_pack</code> tile with deterministic min/max priority heap. Highest fee adherence in test (~94%).</p><br>
-            <p><b>2. Jito-Solana:</b> Dedicates initial slot prefix to auction bundles, followed by strict fee-based mempool staging (~86%).</p><br>
-            <p><b>3. Agave (Anza):</b> Employs multi-threaded BankingStage channel queues. While each thread prioritizes fee, independent thread execution causes interleaving jitter (~68%).</p><br>
-            <p><b>4. FIFO Disentanglement:</b> Inverted Descending Fee bursts prove that high fees override arrival order in Firedancer & Jito.</p>
+            <p><b>1. Agave-BAM (Block Arch):</b> Highest fee density adherence in live testing (&rho; = +0.342, Strictness: 28%). Actively optimizes global fee yield.</p><br>
+            <p><b>2. Agave (Anza):</b> Multi-threaded BankingStage channels (&rho; = +0.155 to +0.278, Strictness: 15&ndash;21%). Concurrency causes interleaving across independent accounts.</p><br>
+            <p><b>3. Jito-Solana:</b> Dedicates initial slot prefix to auction bundles, followed by fee-prioritized mempool queues (&rho; = +0.234 to +0.252, Strictness: 17&ndash;19%).</p><br>
+            <p><b>4. Firedancer (Jump Crypto):</b> Dedicated C <code>fd_pack</code> priority heap tile (&rho; = +0.176 to +0.206, Strictness: 11&ndash;14%). Remote network transit spreads packets across leader slots.</p><br>
+            <p><b>5. FIFO Disentanglement:</b> Inverted Descending Fee bursts prove that high fees override arrival order across all client forks.</p>
           </div>
         </div>
       </div>

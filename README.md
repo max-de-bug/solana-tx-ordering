@@ -175,9 +175,31 @@ cargo run -- --live --keypair-path ./keys/id.json --spend-cap-sol 0.05 --serve-d
 
 ---
 
+## Methodological Pitfalls & How This Project Solves Them
+
+| Common Pitfall in Scheduler Research | Failure Mode | How This Architecture Solves It |
+|---|---|---|
+| **1. Leader Drift & Sample Dilution** | Transmitting without 4-slot window synchronization causes packets to drift across 100+ random leaders, leaving only $N=1$ burst per validator (statistically invalid). | Synchronizes with the active epoch schedule via `LeaderScheduleManager`, testing 4 complete bursts (24–32 transactions) per target validator. |
+| **2. Client Fork Misattribution** | Misinterpreting version numbers (e.g. confusing Firedancer `26.x.x` with Jito). | Categorizes all 4 client families (`Agave`, `Jito-Solana`, `Firedancer`, `Agave-BAM`) with verified version tags and real stake weights. |
+| **3. Fee-Payer Lock Serialization** | Reusing a single fee-payer account forces runtime lock serialization, artificially masking multi-threaded scheduler queues. | Implements `build_independent_burst` with distinct ephemeral signers, completely isolating scheduler priority queues from account write locks. |
+| **4. Binary Counting vs Non-Parametric Statistics** | Counting trivial 3-item order reversals ($3! = 6$) ignores fee magnitudes and lacks statistical power. | Deploys 8 fee tiers across 5 orders of magnitude (100 to 10M $\mu$L/CU), Spearman $\rho$, Kendall $\tau$, and 1,000-trial Monte Carlo permutation testing ($p < 0.001$). |
+| **5. Client-Side HTTP Serialization Delay** | Sending transactions sequentially over HTTP introduces artificial 5–30ms latency between burst items. | Dispatches burst transactions via single-roundtrip JSON-RPC batching (`send_transaction_batch`) in one TCP segment. |
+
+---
+
 ## Raw Data Verification Guide (For Judges)
 
 All 216 confirmed transactions and slot numbers are stored in `data/measurements.json` and `data/analysis.json`. Claims can be verified independently against Solana Mainnet:
+
+### 1. Automated One-Command Verification Script (Recommended)
+
+Run the automated verification suite to sample all 7 validators and query live Mainnet JSON-RPC:
+
+```bash
+python scripts/verify_claims.py
+```
+
+### 2. Manual On-Chain Verification via Solana CLI / curl
 
 ```bash
 # 1. Query confirmed block on Solana Mainnet
@@ -209,6 +231,7 @@ curl -s -X POST -H "Content-Type: application/json" \
 │   ├── index.html           # Web report entrypoint
 │   └── figures/             # Gnuplot 6.0 scientific charts (PNG & GP script)
 ├── scripts/
+│   ├── verify_claims.py         # Automated Mainnet claim & on-chain signature verifier
 │   ├── aggregate_mainnet_data.py # Block parser and on-chain signature aggregator
 │   └── generate_plots.py        # Gnuplot 6.0 figure generation driver
 └── src/

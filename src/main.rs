@@ -188,24 +188,35 @@ async fn main() -> anyhow::Result<()> {
 
             // In live mode, send transactions subject to spend cap
             if is_live {
-                for tx in &burst_txs {
-                    // Check spend cap before sending
-                    if let Err(e) = spend_tracker.pre_check_spend(tx.estimated_fee_lamports) {
-                        warn!("Spend cap guard prevented transaction: {}", e);
-                        break;
-                    }
+                // Verify spend cap for the entire burst before broadcast
+                let total_burst_fee: u64 = burst_txs.iter().map(|t| t.estimated_fee_lamports).sum();
+                if let Err(e) = spend_tracker.pre_check_spend(total_burst_fee) {
+                    warn!("Spend cap guard prevented burst: {}", e);
+                    continue;
+                }
 
-                    match rpc.send_transaction(&tx.base64_payload).await {
-                        Ok(sig) => {
+                // Batch dispatch burst transactions in a single HTTP request to eliminate client serialization delay
+                let payloads: Vec<String> = burst_txs.iter().map(|t| t.base64_payload.clone()).collect();
+                match rpc.send_transaction_batch(&payloads).await {
+                    Ok(sigs) => {
+                        info!("Broadcast burst of {} transactions via JSON-RPC batch ({} signatures received)", payloads.len(), sigs.len());
+                        for (tx, sig) in burst_txs.iter().zip(sigs.iter()) {
                             info!("Broadcast tx: {}", sig);
                             spend_tracker.increment_sent();
                             spend_tracker.record_spend(tx.estimated_fee_lamports);
                         }
-                        Err(e) => {
-                            warn!("Broadcast failed: {}", e);
+                    }
+                    Err(e) => {
+                        warn!("Batch broadcast failed ({}), falling back to sequential dispatch...", e);
+                        for tx in &burst_txs {
+                            if let Ok(sig) = rpc.send_transaction(&tx.base64_payload).await {
+                                info!("Broadcast tx (fallback): {}", sig);
+                                spend_tracker.increment_sent();
+                                spend_tracker.record_spend(tx.estimated_fee_lamports);
+                            }
+                            tokio::time::sleep(Duration::from_millis(5)).await;
                         }
                     }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
 
                 // Await block confirmation

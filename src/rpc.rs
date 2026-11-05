@@ -230,6 +230,53 @@ impl RpcClient {
             .ok_or_else(|| anyhow::anyhow!("Invalid signature returned from sendTransaction"))
     }
 
+    /// Dispatches a burst of transactions in a single batched JSON-RPC HTTP request
+    /// to minimize client-side inter-packet serialization latency.
+    pub async fn send_transaction_batch(&self, base64_txs: &[String]) -> anyhow::Result<Vec<String>> {
+        if base64_txs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let batch: Vec<Value> = base64_txs
+            .iter()
+            .enumerate()
+            .map(|(idx, tx)| {
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": idx + 1,
+                    "method": "sendTransaction",
+                    "params": [
+                        tx,
+                        {
+                            "encoding": "base64",
+                            "skipPreflight": true,
+                            "preflightCommitment": "processed",
+                            "maxRetries": 3
+                        }
+                    ]
+                })
+            })
+            .collect();
+
+        let resp = self.http.post(&self.endpoint).json(&batch).send().await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("Batch sendTransaction HTTP error: {}", resp.status());
+        }
+
+        let json_arr: Vec<Value> = resp.json().await?;
+        let mut sigs = Vec::with_capacity(json_arr.len());
+
+        for item in json_arr {
+            if let Some(sig) = item.get("result").and_then(|r| r.as_str()) {
+                sigs.push(sig.to_string());
+            } else if let Some(err) = item.get("error") {
+                warn!("Batch tx item error: {}", err);
+            }
+        }
+
+        Ok(sigs)
+    }
+
     #[allow(dead_code)]
     pub async fn get_signature_status(
         &self,
