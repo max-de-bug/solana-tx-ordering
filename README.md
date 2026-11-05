@@ -5,7 +5,7 @@
 [![Solana Mainnet](https://img.shields.io/badge/Solana-Mainnet--Beta-9945FF?style=flat&logo=solana)](https://solana.com)
 [![Rust 1.80+](https://img.shields.io/badge/Rust-1.80%2B-orange?style=flat&logo=rust)](https://rust-lang.org)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat&logo=docker)](https://docker.com)
-[![Live Dashboard](https://img.shields.io/badge/Live%20Dashboard-reports--one--iota.vercel.app-008080?style=flat)](https://reports-one-iota.vercel.app)
+[![Live Dashboard](https://img.shields.io/badge/Live%20Dashboard-solana--tx--ordering.vercel.app-008080?style=flat)](https://solana-tx-ordering.vercel.app)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
@@ -171,7 +171,7 @@ cargo run -- --live --keypair-path ./keys/id.json --spend-cap-sol 0.05 --serve-d
 
 ### 3. Live Dashboard URL & Offline Viewing
 
-- **Live Production URL:** [https://reports-one-iota.vercel.app](https://reports-one-iota.vercel.app)
+- **Live Production URL:** [https://solana-tx-ordering.vercel.app](https://solana-tx-ordering.vercel.app)
 - **Local Browser:** Double-click [`reports/index.html`](reports/index.html) (or `reports/dashboard.html`) to view the dashboard completely offline without running any server.
 
 ---
