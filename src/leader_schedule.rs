@@ -80,19 +80,34 @@ impl LeaderScheduleManager {
     }
 
     /// Finds the next upcoming leader window for a target validator identity
+    #[allow(dead_code)]
     pub fn find_next_window(
         &self,
         validator_identity: &str,
         current_slot: u64,
     ) -> Option<LeaderWindow> {
-        let slot_indices = self.schedule.get(validator_identity)?;
+        self.find_upcoming_windows(validator_identity, current_slot, 1).into_iter().next()
+    }
+
+    /// Finds multiple upcoming distinct 4-slot leader windows for a validator identity
+    pub fn find_upcoming_windows(
+        &self,
+        validator_identity: &str,
+        current_slot: u64,
+        count: usize,
+    ) -> Vec<LeaderWindow> {
+        let slot_indices = match self.schedule.get(validator_identity) {
+            Some(indices) => indices,
+            None => return Vec::new(),
+        };
+
         let current_index = if current_slot >= self.first_slot_in_epoch {
             (current_slot - self.first_slot_in_epoch) as usize
         } else {
             0
         };
 
-        let min_lead_slots = 10;
+        let min_lead_slots = 5;
         let mut upcoming_slots = Vec::new();
 
         for &idx in slot_indices {
@@ -103,21 +118,33 @@ impl LeaderScheduleManager {
 
         upcoming_slots.sort_unstable();
 
-        if let Some(&first_idx) = upcoming_slots.first() {
-            let start_slot = self.first_slot_in_epoch + first_idx as u64;
-            let slots_until = start_slot.saturating_sub(current_slot);
-            let est_time_ms = slots_until * 400;
+        // Group into 4-slot windows (where consecutive slots are chunks)
+        let mut windows = Vec::new();
+        let mut last_window_end = 0usize;
 
-            return Some(LeaderWindow {
-                validator_identity: validator_identity.to_string(),
-                start_slot,
-                end_slot: start_slot + 3,
-                window_length: 4,
-                estimated_start_time_ms: est_time_ms,
-            });
+        for &idx in &upcoming_slots {
+            if idx > last_window_end {
+                let start_slot = self.first_slot_in_epoch + idx as u64;
+                let slots_until = start_slot.saturating_sub(current_slot);
+                let est_time_ms = slots_until * 400;
+
+                windows.push(LeaderWindow {
+                    validator_identity: validator_identity.to_string(),
+                    start_slot,
+                    end_slot: start_slot + 3,
+                    window_length: 4,
+                    estimated_start_time_ms: est_time_ms,
+                });
+
+                last_window_end = idx + 3;
+
+                if windows.len() >= count {
+                    break;
+                }
+            }
         }
 
-        None
+        windows
     }
 
     /// Wait and synchronize precisely with the leader window onset

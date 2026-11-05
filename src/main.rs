@@ -87,10 +87,9 @@ async fn main() -> anyhow::Result<()> {
     // Load or generate keypair
     let payer = if is_live {
         let key_path = config.keypair_path.as_ref().unwrap();
-        let key_bytes = fs::read_to_string(key_path)?;
-        let key_vec: Vec<u8> = serde_json::from_str(&key_bytes)?;
-        let kp = Keypair::try_from(&key_vec[..])
-            .map_err(|e| anyhow::anyhow!("Invalid keypair format: {}", e))?;
+        let key_str = fs::read_to_string(key_path)
+            .map_err(|e| anyhow::anyhow!("Could not read keypair file at {:?}: {}", key_path, e))?;
+        let kp = parse_keypair(&key_str)?;
         info!("Loaded fee-payer keypair: {}", kp.pubkey());
 
         let balance = rpc.get_balance(&kp.pubkey().to_string()).await.unwrap_or(0);
@@ -136,36 +135,40 @@ async fn main() -> anyhow::Result<()> {
     let mut all_burst_results: Vec<BurstAnalysisResult> = Vec::new();
 
     for (v_idx, validator) in validators.iter().enumerate() {
+        let current_slot = rpc.get_slot().await.unwrap_or(current_slot);
         info!("============================================================");
         info!(
-            "Analyzing Validator {}/{}: {} ({})",
+            "Analyzing Validator {}/{}: {} ({}) [cluster slot: {}]",
             v_idx + 1,
             validators.len(),
             validator.name,
-            validator.client_type
+            validator.client_type,
+            current_slot
         );
 
-        // Find upcoming leader window
-        let window = match schedule_mgr.find_next_window(&validator.identity, current_slot) {
-            Some(w) => w,
-            None => {
-                warn!("No upcoming window found for {}; synthesizing window.", validator.name);
-                leader_schedule::LeaderWindow {
-                    validator_identity: validator.identity.clone(),
-                    start_slot: current_slot + 20 + (v_idx as u64 * 15),
-                    end_slot: current_slot + 23 + (v_idx as u64 * 15),
-                    window_length: 4,
-                    estimated_start_time_ms: 1000,
-                }
-            }
-        };
-
-        // Synchronize with leader window
-        schedule_mgr.wait_for_window(&rpc, &window, !is_live).await?;
+        // Find upcoming leader windows (one dedicated 4-slot window per pattern)
+        let upcoming_windows = schedule_mgr.find_upcoming_windows(&validator.identity, current_slot, patterns.len());
 
         // Test multiple patterns for each validator to isolate FIFO vs Priority Fee
         for (p_idx, &pattern) in patterns.iter().enumerate() {
-            let burst_id = format!("{}-{}-p{}", &validator.identity[..6], window.start_slot, p_idx);
+            let window = match upcoming_windows.get(p_idx) {
+                Some(w) => w.clone(),
+                None => {
+                    warn!("No distinct upcoming window found for {} pattern {}; synthesizing window.", validator.name, p_idx);
+                    leader_schedule::LeaderWindow {
+                        validator_identity: validator.identity.clone(),
+                        start_slot: current_slot + 20 + (v_idx as u64 * 30) + (p_idx as u64 * 5),
+                        end_slot: current_slot + 23 + (v_idx as u64 * 30) + (p_idx as u64 * 5),
+                        window_length: 4,
+                        estimated_start_time_ms: 1000,
+                    }
+                }
+            };
+
+            // Synchronize with target leader window
+            schedule_mgr.wait_for_window(&rpc, &window, !is_live).await?;
+
+            let burst_id = format!("{}-{}-p{}", &validator.identity[..6.min(validator.identity.len())], window.start_slot, p_idx);
             info!("Deploying burst {} with pattern {:?}", burst_id, pattern);
 
             // Fetch recent blockhash
@@ -196,6 +199,7 @@ async fn main() -> anyhow::Result<()> {
                         Ok(sig) => {
                             info!("Broadcast tx: {}", sig);
                             spend_tracker.increment_sent();
+                            spend_tracker.record_spend(tx.estimated_fee_lamports);
                         }
                         Err(e) => {
                             warn!("Broadcast failed: {}", e);
@@ -205,7 +209,7 @@ async fn main() -> anyhow::Result<()> {
                 }
 
                 // Await block confirmation
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
             }
 
             // Fetch landing block and analyze order
@@ -313,10 +317,42 @@ async fn fetch_or_simulate_block(
     _pattern: BurstPattern,
     is_live: bool,
 ) -> anyhow::Result<rpc::DetailedBlock> {
-    // In live mode, fetch the actual confirmed block from mainnet RPC
+    // In live mode, detect actual landing slot and fetch confirmed Mainnet block
     if is_live {
-        if let Ok(block) = rpc.get_block(slot).await {
-            return Ok(block);
+        info!("Awaiting transaction confirmation across leader window (target slot: {})...", slot);
+        let mut detected_slot = None;
+
+        for attempt in 1..=8 {
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            for tx in burst_txs {
+                if let Ok(Some(s)) = rpc.get_signature_status(&tx.signature).await {
+                    info!("Transaction {} confirmed in slot {} (attempt {})", &tx.signature[..12], s, attempt);
+                    detected_slot = Some(s);
+                    break;
+                }
+            }
+            if detected_slot.is_some() {
+                break;
+            }
+        }
+
+        let query_slot = detected_slot.unwrap_or(slot);
+        info!("Querying confirmed Mainnet block for slot {}...", query_slot);
+
+        for attempt in 1..=5 {
+            match rpc.get_block(query_slot).await {
+                Ok(block) => {
+                    info!(
+                        "Successfully fetched real Mainnet block {} with {} confirmed transactions!",
+                        query_slot, block.total_transactions
+                    );
+                    return Ok(block);
+                }
+                Err(e) => {
+                    warn!("Block {} not ready yet (attempt {}): {}. Retrying in 1.5s...", query_slot, attempt, e);
+                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                }
+            }
         }
     }
 
@@ -425,4 +461,40 @@ fn print_cli_summary(results: &[ValidatorAggregatedResult], tracker: &SpendTrack
         (tracker.current_spent_sol() / tracker.cap_sol()) * 100.0
     );
     println!("==========================================================================================\n");
+}
+
+/// Robust keypair parser accepting either a JSON byte array [1,2,3...] or a Base58 private key string
+fn parse_keypair(key_str: &str) -> anyhow::Result<Keypair> {
+    let trimmed = key_str.trim();
+
+    // 1. Try JSON byte array: [1, 2, 3, ...]
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        if let Ok(bytes) = serde_json::from_str::<Vec<u8>>(trimmed) {
+            if bytes.len() == 64 {
+                if let Ok(kp) = Keypair::try_from(&bytes[..]) {
+                    return Ok(kp);
+                }
+            } else if bytes.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                return Ok(Keypair::new_from_array(arr));
+            }
+        }
+    }
+
+    // 2. Try Base58 private key string (from Phantom, Backpack, Solflare)
+    let clean_b58 = trimmed.trim_matches('"').trim();
+    if let Ok(bytes) = bs58::decode(clean_b58).into_vec() {
+        if bytes.len() == 64 {
+            if let Ok(kp) = Keypair::try_from(&bytes[..]) {
+                return Ok(kp);
+            }
+        } else if bytes.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            return Ok(Keypair::new_from_array(arr));
+        }
+    }
+
+    anyhow::bail!("Invalid keypair format. Provide either a 64-byte JSON array [1,2,3...] or a Base58 private key string.")
 }

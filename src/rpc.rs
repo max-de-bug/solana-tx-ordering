@@ -48,6 +48,7 @@ pub struct VoteAccountsResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EpochInfo {
     pub absolute_slot: u64,
     pub block_height: u64,
@@ -58,6 +59,7 @@ pub struct EpochInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LatestBlockhash {
     pub blockhash: String,
     pub last_valid_block_height: u64,

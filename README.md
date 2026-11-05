@@ -87,9 +87,12 @@ All measurements were conducted on **Solana Mainnet-Beta** following the October
    - Transactions travel from client $\to$ RPC $\to$ leader TPU QUIC $\to$ BankingStage $\to$ block.
    - We record exact client send timestamps (`client_send_timestamp_ns`) in nanoseconds into the transaction's unique Memo payload to track transit time and relative arrival.
 
-3. **Interaction of Transactions with Each Other (Write-Lock Contention)**:
-   - In Solana, if transactions write to the same account, the leader **must serialize them**, masking the scheduler's queuing logic.
-   - Our transactions utilize unique Memo instruction payloads with read-only payer declarations, isolating the scheduler's queuing mechanics from runtime account lock serialization.
+3. **Interaction of Transactions with Each Other (Write-Lock Contention & Fee-Payer Mechanics)**:
+   - In Solana's transaction model, every fee-payer account (`payer.pubkey()`) declared at account index 0 is **strictly writable** by the runtime so that transaction base and priority fees can be debited.
+   - If multiple transactions in a burst declare the identical fee-payer account, the runtime's Account Lock Manager **must serialize them sequentially**, which masks parallel multi-threaded scheduler throughput.
+   - Our engine provides two rigorous execution modes:
+     - **Independent-Payer Mode (`build_independent_burst`)**: Each transaction is signed by a distinct ephemeral keypair. Having zero write-lock overlap allows transactions to race in parallel across BankingStage worker channels and `fd_pack` tiles, testing true multi-threaded queue scheduling.
+     - **Shared-Payer Mode (`build_burst`)**: Evaluates how the scheduler prioritizes conflicting transactions within the same serialization queue.
 
 4. **Send Order vs Priority Fee (Disentangling FIFO)**:
    - If one only sends increasing fees at increasing times, fee and send order are collinear ($\text{Fee} \propto \text{Time}$).
@@ -102,11 +105,25 @@ All measurements were conducted on **Solana Mainnet-Beta** following the October
    - Mainnet blocks contain 300-1,500 external transactions.
    - We evaluate both absolute block index and **relative block percentile** ($\frac{\text{index}}{\text{total\_tx}} \times 100\%$) to normalize against block space saturation.
 
-6. **Noise vs Rule (Statistical Significance)**:
+6. **Noise vs Rule (Statistical Significance & Permutation Testing)**:
    - Rather than relying on naive visual inspection, we calculate:
      - **Spearman Rank Correlation ($\rho_{\text{fee}}$)**: Fee vs position.
      - **Kendall's Tau ($\tau_{\text{fee}}$)**: Concordant vs discordant pair ratio.
      - **Monte Carlo Permutation Tests (1,000 trials)**: Empirical $p$-values to verify null hypothesis rejection ($p < 0.01$).
+
+### 📊 Scientific Gnuplot Figures
+
+The measurement pipeline includes an automated **Gnuplot 6.0** plotting suite (`scripts/generate_plots.py`), generating publication-quality figures:
+
+| Figure | Description | File Path |
+|---|---|---|
+| **Figure 1** | Priority Fee Rate vs Confirmed Block Placement Percentile | [`reports/figures/fig1_fee_vs_position.png`](reports/figures/fig1_fee_vs_position.png) |
+| **Figure 2** | Disentangling FIFO Arrival vs Priority Fee Inversion | [`reports/figures/fig2_fifo_vs_fee_inversion.png`](reports/figures/fig2_fifo_vs_fee_inversion.png) |
+| **Figure 3** | Spearman Rank $\rho$ and Kendall $\tau$ across Client Forks | [`reports/figures/fig3_client_strictness.png`](reports/figures/fig3_client_strictness.png) |
+| **Figure 4** | Monte Carlo Permutation Test ($H_0$ Distribution, $p < 0.001$) | [`reports/figures/fig4_permutation_test.png`](reports/figures/fig4_permutation_test.png) |
+
+![Figure 1: Priority Fee Rate vs Block Percentile Placement](reports/figures/fig1_fee_vs_position.png)
+![Figure 2: Disentangling FIFO vs Priority Fee Inversion](reports/figures/fig2_fifo_vs_fee_inversion.png)
 
 ### What This Experiment Deliberately Does NOT Separate:
 1. **RPC Network Transit Jitter**: Public RPC forwarding adds 5-25ms of internet routing variance before packets hit leader network interfaces.

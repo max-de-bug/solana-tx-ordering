@@ -329,53 +329,34 @@ impl Analyzer {
             0.0
         };
 
-        let (rule, strictness, desc) = match validator.client_type {
-            ClientType::Agave => {
-                if avg_spearman_fee > 0.65 {
-                    (
-                        "Priority Fee Queue (Agave CentralScheduler)".to_string(),
-                        0.72,
-                        "Transactions are staged in priority queues; however, multi-threaded worker channels cause non-negligible interleaving jitter across non-conflicting accounts.".to_string(),
-                    )
-                } else {
-                    (
-                        "Multi-Threaded Channel Race (Agave BankingStage)".to_string(),
-                        0.38,
-                        "Independent accounts hash to separate BankingStage worker channels, resulting in high position variance where arrival timing across threads dominates.".to_string(),
-                    )
-                }
-            }
-            ClientType::JitoSolana => {
-                (
-                    "Fee-Bidded Prioritization (Jito-Solana Engine)".to_string(),
-                    0.86,
-                    "Strict priority fee ordering within standard mempool transactions, with bundles executing in designated slot prefixes.".to_string(),
-                )
-            }
-            ClientType::Firedancer => {
-                (
-                    "Deterministic Tile Priority Queue (Firedancer)".to_string(),
-                    0.94,
-                    "Hardware-accelerated deterministic priority ordering with sub-microsecond enqueueing, displaying the highest strictness of fee adherence.".to_string(),
-                )
-            }
-            ClientType::AgaveBam => {
-                (
-                    "BAM External Block Optimization".to_string(),
-                    0.89,
-                    "Transactions ordered by global MEV/fee density via external Block Architecture Module pipeline.".to_string(),
-                )
-            }
-            ClientType::SolanaLabsLegacy => (
-                "Legacy ThreadLocal BankingStage (FIFO-biased)".to_string(),
-                0.45,
-                "Strong FIFO arrival bias with weak priority fee reordering.".to_string(),
-            ),
-            ClientType::UnknownFork => (
-                "Empirical Ordering Rule".to_string(),
-                0.50,
-                "Empirical measurements show balanced fee and arrival influences.".to_string(),
-            ),
+        // Compute strictness dynamically from empirical correlation metrics
+        let strictness = ((avg_spearman_fee.max(0.0) * 0.6) + (avg_kendall.max(0.0) * 0.4)).clamp(0.0, 1.0);
+
+        let (rule, desc) = if avg_spearman_fee >= 0.85 {
+            (
+                format!("Deterministic Priority Queue ({})", validator.client_type),
+                "Strong deterministic priority ordering: transactions with higher compute unit price almost strictly land earlier in the block, overriding FIFO send order.".to_string(),
+            )
+        } else if avg_spearman_fee >= 0.60 {
+            (
+                format!("Multi-Thread Interleaved Priority ({})", validator.client_type),
+                "Transactions are prioritized by compute unit price within worker channels, but concurrent worker commit cycles cause position interleaving across non-conflicting accounts.".to_string(),
+            )
+        } else if avg_spearman_fee >= 0.35 {
+            (
+                format!("Weak Fee Prioritization ({})", validator.client_type),
+                "Moderate fee correlation observed; network arrival timing and worker dispatch introduce substantial position variance.".to_string(),
+            )
+        } else if avg_spearman_send >= 0.60 {
+            (
+                format!("FIFO Arrival Bias ({})", validator.client_type),
+                "Arrival order strongly correlates with block position; priority fees do not overcome arrival order.".to_string(),
+            )
+        } else {
+            (
+                "Noise / No Consistent Rule (Null Result)".to_string(),
+                "Neither priority fee nor send order shows statistically significant correlation with block position (consistent with thread race conditions or saturation noise).".to_string(),
+            )
         };
 
         ValidatorAggregatedResult {
@@ -395,5 +376,93 @@ impl Analyzer {
             rule_description: desc,
             burst_summaries: v_bursts,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_perfect_fee_correlation() {
+        // High fee lands earlier (index 0, 1, 2)
+        let txs = vec![
+            TxLandingResult {
+                signature: "sig1".to_string(),
+                sequence_index: 0,
+                priority_fee_micro_lamports: 1_000_000,
+                send_timestamp_ns: 100,
+                landed_in_slot: 1,
+                index_in_block: 5,
+                total_transactions_in_block: 100,
+                relative_block_percentile: 5.0,
+                fee_paid_lamports: 6000,
+                compute_units_consumed: Some(300),
+            },
+            TxLandingResult {
+                signature: "sig2".to_string(),
+                sequence_index: 1,
+                priority_fee_micro_lamports: 500_000,
+                send_timestamp_ns: 200,
+                landed_in_slot: 1,
+                index_in_block: 10,
+                total_transactions_in_block: 100,
+                relative_block_percentile: 10.0,
+                fee_paid_lamports: 5500,
+                compute_units_consumed: Some(300),
+            },
+            TxLandingResult {
+                signature: "sig3".to_string(),
+                sequence_index: 2,
+                priority_fee_micro_lamports: 100,
+                send_timestamp_ns: 300,
+                landed_in_slot: 1,
+                index_in_block: 20,
+                total_transactions_in_block: 100,
+                relative_block_percentile: 20.0,
+                fee_paid_lamports: 5000,
+                compute_units_consumed: Some(300),
+            },
+        ];
+
+        let (rho, _pval) = Analyzer::compute_spearman_and_p_val(&txs, true);
+        assert!((rho - 1.0).abs() < 1e-4, "Spearman fee correlation should be 1.0, got {}", rho);
+
+        let tau = Analyzer::compute_kendall_tau(&txs);
+        assert!((tau - 1.0).abs() < 1e-4, "Kendall tau should be 1.0, got {}", tau);
+    }
+
+    #[test]
+    fn test_reverse_fee_correlation() {
+        // High fee lands later (inverted)
+        let txs = vec![
+            TxLandingResult {
+                signature: "sig1".to_string(),
+                sequence_index: 0,
+                priority_fee_micro_lamports: 1_000_000,
+                send_timestamp_ns: 100,
+                landed_in_slot: 1,
+                index_in_block: 50,
+                total_transactions_in_block: 100,
+                relative_block_percentile: 50.0,
+                fee_paid_lamports: 6000,
+                compute_units_consumed: Some(300),
+            },
+            TxLandingResult {
+                signature: "sig2".to_string(),
+                sequence_index: 1,
+                priority_fee_micro_lamports: 100,
+                send_timestamp_ns: 200,
+                landed_in_slot: 1,
+                index_in_block: 10,
+                total_transactions_in_block: 100,
+                relative_block_percentile: 10.0,
+                fee_paid_lamports: 5000,
+                compute_units_consumed: Some(300),
+            },
+        ];
+
+        let tau = Analyzer::compute_kendall_tau(&txs);
+        assert!((tau - (-1.0)).abs() < 1e-4, "Kendall tau should be -1.0, got {}", tau);
     }
 }

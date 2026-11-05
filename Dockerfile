@@ -21,6 +21,8 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    python3 \
+    gnuplot \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -28,9 +30,10 @@ WORKDIR /app
 # Copy binary from builder
 COPY --from=builder /usr/src/solana-validator-ordering/target/release/solana-validator-ordering /usr/local/bin/solana-validator-ordering
 
-# Copy existing raw data and report assets
+# Copy existing raw data, report assets, and plotting scripts
 COPY data ./data
 COPY reports ./reports
+COPY scripts ./scripts
 
 # Create volumes for persistent outputs and secure key mounting
 VOLUME ["/app/data", "/app/reports", "/keys"]

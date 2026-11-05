@@ -103,3 +103,37 @@ impl SpendTracker {
         self.total_tx_confirmed.load(Ordering::SeqCst)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_spend_tracker_cap_enforcement() {
+        // Cap at 0.0001 SOL = 100,000 lamports
+        let tracker = SpendTracker::new(0.0001);
+        assert_eq!(tracker.cap_sol(), 0.0001);
+
+        // Pre-check 40,000 lamports should succeed
+        assert!(tracker.pre_check_spend(40_000).is_ok());
+
+        // Record 40,000 spend
+        tracker.record_spend(40_000);
+        assert_eq!(tracker.current_spent_lamports(), 40_000);
+        assert_eq!(tracker.total_confirmed(), 1);
+
+        // Pre-check another 50,000 should succeed (total 90,000 <= 100,000)
+        assert!(tracker.pre_check_spend(50_000).is_ok());
+        tracker.record_spend(50_000);
+        assert_eq!(tracker.current_spent_lamports(), 90_000);
+
+        // Pre-check 20,000 should fail (90,000 + 20,000 = 110,000 > 100,000)
+        assert!(tracker.pre_check_spend(20_000).is_err());
+    }
+
+    #[test]
+    fn test_spend_tracker_zero_cap() {
+        let tracker = SpendTracker::new(0.0);
+        assert!(tracker.pre_check_spend(1).is_err());
+    }
+}
