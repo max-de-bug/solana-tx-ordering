@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::path::PathBuf;
 
-/// Solana Validator Transaction Ordering Experiment Engine (Windows 95 Edition)
+/// Solana Validator Transaction Ordering Experiment Engine (Windows 95 Style)
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "solana-validator-ordering",

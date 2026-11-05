@@ -58,10 +58,10 @@ async fn main() -> anyhow::Result<()> {
     // If --live is explicitly requested, safety check
     let is_live = config.live;
     if is_live {
-        warn!("⚠️  LIVE MODE ACTIVE: Real transactions will be broadcast to Solana Mainnet!");
+        warn!("LIVE MODE ACTIVE: Real transactions will be broadcast to Solana Mainnet!");
         config.validate()?;
     } else {
-        info!("🛡️  DRY-RUN MODE ACTIVE (Safe by default): Transactions will be prepared & simulated, but NOT broadcast.");
+        info!("DRY-RUN MODE ACTIVE (Safe by default): Transactions will be prepared & simulated, but NOT broadcast.");
     }
 
     fs::create_dir_all(&config.data_dir)?;

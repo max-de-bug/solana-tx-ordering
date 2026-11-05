@@ -15,6 +15,10 @@ keypair*.json
 !data/*.json
 !examples/*.json
 
+# Vercel deployment cache
+.vercel
+**/.vercel
+
 # Operating System & IDE
 .DS_Store
 Thumbs.db

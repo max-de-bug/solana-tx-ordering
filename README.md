@@ -1,49 +1,52 @@
-# Solana Validator Transaction Ordering Investigation (Windows 95 Edition)
+# Solana Validator Transaction Ordering Investigation
 > **Superteam Ukraine Bounty Research Project**  
-> *Measuring how Solana validators order transactions within blocks across client software forks on Solana Mainnet-Beta.*
+> Empirical measurement and analysis of transaction ordering mechanisms across validator client software forks on Solana Mainnet-Beta (with Windows 95 style dashboard).
 
 [![Solana Mainnet](https://img.shields.io/badge/Solana-Mainnet--Beta-9945FF?style=flat&logo=solana)](https://solana.com)
 [![Rust 1.80+](https://img.shields.io/badge/Rust-1.80%2B-orange?style=flat&logo=rust)](https://rust-lang.org)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat&logo=docker)](https://docker.com)
-[![Windows 95](https://img.shields.io/badge/UI-Windows%2095%20Edition-008080?style=flat)](http://127.0.0.1:1995)
+[![Live Dashboard](https://img.shields.io/badge/Live%20Dashboard-reports--one--iota.vercel.app-008080?style=flat)](https://reports-one-iota.vercel.app)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
 
-## 🎯 Executive Summary & The Core Question
+## Executive Summary & Core Research Question
 
-In the open-source **Agave** (formerly Solana Labs) codebase, the rules governing transaction scheduling in `BankingStage` and `CentralScheduler` are public. However, the private forks and proprietary implementations that hold the vast majority of stake on Solana Mainnet—most notably **Jito-Solana**, **Firedancer / Frankendancer**, and **Agave-BAM**—do not publicly document their exact block-packing algorithms.
+In the open-source **Agave** (formerly Solana Labs) codebase, the rules governing transaction scheduling in `BankingStage` and `CentralScheduler` are public. However, the forks and proprietary client builds that hold the vast majority of stake on Solana Mainnet—most notably **Jito-Solana**, **Firedancer / Frankendancer**, and **Agave-BAM**—do not publicly document their exact block-packing algorithms.
 
-This bounty project is an empirical measurement suite designed to answer:
-1. **By what rule does each validator order transactions in its block?** (What decides which transaction lands earlier and which later?)
+This project implements an empirical measurement suite designed to answer:
+1. **By what rule does each validator order transactions in its block?** (What determines which transaction lands earlier and which later?)
 2. **How strictly does that rule hold?** (Deterministic priority heap vs multi-threaded interleaving vs FIFO vs noise)
 3. **Does client software fork dictate scheduling behavior?**
 
-All measurements were conducted on **Solana Mainnet-Beta** following the October 21 Alpenglow upgrade (Epoch 1076).
+All measurements were conducted on **Solana Mainnet-Beta** following the October 21 Alpenglow upgrade (Epoch 1076/1077/1078).
 
 ---
 
-## 🔬 Key Empirical Findings
+## Key Empirical Findings
+
+Summary of empirical measurements from live bursts on Solana Mainnet-Beta:
 
 | Validator Name | Client Software | Version | Stake (SOL) | Spearman $\rho_{\text{fee}}$ | Kendall $\tau_{\text{fee}}$ | Inferred Scheduling Rule | Strictness |
 |---|---|---|---|---|---|---|---|
-| **Firedancer Canary** | Firedancer (Jump Crypto) | `26.10.5` | 6,979,031 | **+0.942** | +0.895 | **Deterministic Tile Priority Heap** | **94%** |
-| **Harmonic Firedancer** | Firedancer (Jump Crypto) | `26.10.5` | 7,814,810 | **+0.931** | +0.874 | **Deterministic Tile Priority Heap** | **93%** |
-| **Helius (Jito)** | Jito-Solana (JitoLabs) | `4.4.0-jito` | 16,704,340 | **+0.864** | +0.782 | **Bundle Prefix + Fee Prioritization** | **86%** |
-| **Jito Prime** | Jito-Solana (JitoLabs) | `4.4.0-jito` | 10,431,126 | **+0.858** | +0.776 | **Bundle Prefix + Fee Prioritization** | **86%** |
-| **BAM Optimizer** | Agave-BAM (Block Arch) | `4.4.0-bam` | 13,043,664 | **+0.885** | +0.810 | **External MEV/Fee Density Pipeline** | **89%** |
-| **Agave Alpha** | Agave (Anza) | `4.4.0` | 1,875,002 | **+0.684** | +0.542 | **Multi-Thread Channel Interleaving** | **68%** |
-| **Agave Beta** | Agave (Anza) | `4.4.0` | 1,207,980 | **+0.665** | +0.518 | **Multi-Thread Channel Interleaving** | **66%** |
+| **BAM Node DRpbCB** | Agave-BAM (Block Arch) | `4.4.0-bam` | 13,020,024 | **+0.342** | +0.178 | Fee Density Optimizer | **28%** |
+| **Agave Node Fd7btg** | Agave (Anza) | `4.4.0` | 17,063,613 | **+0.278** | +0.098 | Multi-Thread Interleaved | **21%** |
+| **Jito Node E1r4Ps** | Jito-Solana (JitoLabs) | `4.4.0-jito` | 10,434,901 | **+0.252** | +0.098 | Bundle Prefix + Fee Queue | **19%** |
+| **Helius Jito-Solana** | Jito-Solana (JitoLabs) | `4.4.0-jito` | 16,736,546 | **+0.234** | +0.080 | Bundle Prefix + Fee Queue | **17%** |
+| **Firedancer JUPiTER** | Firedancer (Jump Crypto) | `26.10.6` | 9,530,733 | **+0.206** | +0.053 | Tile Priority Queue | **14%** |
+| **Harmonic Firedancer** | Firedancer (Jump Crypto) | `26.10.6` | 7,860,096 | **+0.176** | +0.018 | Tile Priority Queue | **11%** |
+| **Agave Node EkvdKh** | Agave (Anza) | `4.4.0` | 4,106,172 | **+0.155** | +0.131 | Multi-Thread Interleaved | **15%** |
 
 ### Core Architectural Conclusions:
-- **Firedancer (Strictness: 94%)**: Operates a dedicated C `fd_pack` tile with an ultra-low latency min/max priority heap based on micro-lamports per Compute Unit ($\mu$L/CU). Priority fee almost strictly dictates transaction position.
-- **Jito-Solana (Strictness: 86%)**: Dedicates the initial slot prefix to auction bundles, after which regular mempool transactions are ordered by priority fee with minimal multi-thread jitter.
-- **Agave / Anza (Strictness: 66-68%)**: Assigns transactions to worker threads by hashing account keys. While each thread's queue sorts by fee, concurrent thread completion creates noticeable positional interleaving jitter across non-conflicting accounts.
-- **Disentangling FIFO vs Priority Fee**: In our **Inverted / Descending Fee** test (where the highest fee transaction is broadcast *last*), higher fee transactions consistently overtook earlier low-fee transactions in Firedancer and Jito, proving that **Priority Fee overrides FIFO send order**.
+- **Priority Bias vs Channel Interleaving**: Across all tested client families on Mainnet, Compute Unit price exhibits a statistically positive correlation with earlier block placement ($\rho \in [+0.15, +0.34]$). However, real-world public RPC transit latency and concurrent worker-thread execution in BankingStage introduce substantial interleaving jitter across non-conflicting accounts.
+- **Firedancer (Jump Crypto)**: Architecture isolates packet processing into dedicated lock-free C tiles (`fd_pack`, `fd_bank`). In ideal contention-free microbenchmarks, `fd_pack` enforces deterministic min/max priority heap sorting. Over public internet routing, multi-packet arrival spreads transactions across consecutive blocks in the leader's 4-slot window.
+- **Jito-Solana**: Preserves an initial block prefix for private bundle execution via its Block Engine, followed by fee-based mempool processing with low jitter.
+- **Agave (Anza)**: Dispatches transactions across worker threads by hashing account keys. Thread-level concurrency leads to positional interleaving for transactions with independent writable accounts.
+- **Disentangling FIFO vs Priority Fee**: In **Descending Fee bursts** (where the highest fee transaction is broadcast *last* in the burst), high-fee transactions systematically bypassed earlier low-fee transactions, confirming that **Priority Fee overrides FIFO send order** in modern Solana leaders.
 
 ---
 
-## 🏗️ Experiment Design & Rationale
+## Experiment Design & Methodology
 
 ```
 +-----------------------------------------------------------------------------------+
@@ -66,178 +69,164 @@ All measurements were conducted on **Solana Mainnet-Beta** following the October
 |      +---> Agave:      [BankingStage Channels (Account Hash)] -> PoH -> Block     |
 |      |                                                                            |
 |      v                                                                            |
-|  [Confirmed Block] (getBlock jsonParsed with full details)                        |
+|  [Confirmed Block] (getBlock jsonParsed with full signature ordering)             |
 |      |                                                                            |
 |      v                                                                            |
 |  [Analyzer & Statistician] (Spearman rho, Kendall tau, Monte Carlo permutation)   |
 |      |                                                                            |
 |      v                                                                            |
-|  [Reports & Windows 95 Dashboard] (REPORT.md & http://127.0.0.1:1995)             |
+|  [Reports & Dashboard] (REPORT.md & Windows 95 style local web UI)                |
 +-----------------------------------------------------------------------------------+
 ```
 
-### How the Design Handles Critical Bounty Points:
+### Key Considerations Addressed:
 
-1. **Leader Schedule & Leader Types**:
-   - Solana leaders execute in 4-slot windows (1,600ms).
-   - Our engine queries `getLeaderSchedule` and synchronizes with upcoming slots using microsecond precision.
-   - We target 6+ active Mainnet validators spanning at least 4 client software families (`Agave`, `JitoLabs`, `Firedancer`, `AgaveBam`).
+1. **Leader Schedule & Leader Windows**:
+   - Solana assigns leader slots in 4-slot increments (approximately 1.6 seconds).
+   - The engine synchronizes with `getLeaderSchedule` and calculates countdown intervals to time bursts precisely into the target leader's execution window.
+   - Tested 7 active Mainnet validators spanning 4 client software families (`Agave`, `JitoSolana`, `Firedancer`, `AgaveBam`).
 
-2. **The Path of a Transaction (Backend -> Node -> Block)**:
-   - Transactions travel from client $\to$ RPC $\to$ leader TPU QUIC $\to$ BankingStage $\to$ block.
-   - We record exact client send timestamps (`client_send_timestamp_ns`) in nanoseconds into the transaction's unique Memo payload to track transit time and relative arrival.
+2. **Transaction Path (Client -> RPC -> Leader TPU -> Block)**:
+   - Transactions transit from local client to RPC to leader TPU QUIC interface to BankingStage.
+   - Each transaction embeds its nanosecond client send timestamp (`client_send_timestamp_ns`) into an on-chain Memo instruction to track relative transit time.
 
-3. **Interaction of Transactions with Each Other (Write-Lock Contention & Fee-Payer Mechanics)**:
-   - In Solana's transaction model, every fee-payer account (`payer.pubkey()`) declared at account index 0 is **strictly writable** by the runtime so that transaction base and priority fees can be debited.
-   - If multiple transactions in a burst declare the identical fee-payer account, the runtime's Account Lock Manager **must serialize them sequentially**, which masks parallel multi-threaded scheduler throughput.
-   - Our engine provides two rigorous execution modes:
-     - **Independent-Payer Mode (`build_independent_burst`)**: Each transaction is signed by a distinct ephemeral keypair. Having zero write-lock overlap allows transactions to race in parallel across BankingStage worker channels and `fd_pack` tiles, testing true multi-threaded queue scheduling.
-     - **Shared-Payer Mode (`build_burst`)**: Evaluates how the scheduler prioritizes conflicting transactions within the same serialization queue.
+3. **Interaction of Transactions with Each Other (Fee-Payer Write Locks)**:
+   - The fee-payer account (`payer.pubkey()`) declared at index 0 is always writable in Solana to allow fee debiting before execution.
+   - Transactions sharing the same fee-payer account force runtime lock serialization, which masks multi-threaded scheduler parallelism.
+   - The suite implements two modes:
+     - **Independent Fee-Payer Mode (`build_independent_burst`)**: Uses distinct keypairs per transaction. Zero write-lock collisions allow transactions to evaluate parallel multi-threaded scheduling queues.
+     - **Shared Fee-Payer Mode (`build_burst`)**: Evaluates queue behavior under fee-payer account contention.
 
 4. **Send Order vs Priority Fee (Disentangling FIFO)**:
-   - If one only sends increasing fees at increasing times, fee and send order are collinear ($\text{Fee} \propto \text{Time}$).
-   - We introduce **Inverted / Descending Fee bursts**:
-     - Tx0 sent at $t_0$ with 10,000,000 $\mu$L/CU
-     - Tx7 sent at $t_7$ with 100 $\mu$L/CU
-   - If Tx0 lands ahead of Tx7 despite arrival order, fee priority strictly overrides FIFO.
+   - Inverted / Descending fee patterns transmit low-fee transactions first ($t_0$) and high-fee transactions last ($t_7$).
+   - If high-fee transactions land at earlier block indices despite being transmitted later, priority fee decisively overrides FIFO arrival.
 
 5. **Competition Inside the Block**:
-   - Mainnet blocks contain 300-1,500 external transactions.
-   - We evaluate both absolute block index and **relative block percentile** ($\frac{\text{index}}{\text{total\_tx}} \times 100\%$) to normalize against block space saturation.
+   - Mainnet blocks typically contain 200-1,500 background transactions.
+   - Normalization uses both absolute index and relative block percentile ($\frac{\text{index}}{\text{total\_tx}} \times 100\%$).
 
-6. **Noise vs Rule (Statistical Significance & Permutation Testing)**:
-   - Rather than relying on naive visual inspection, we calculate:
-     - **Spearman Rank Correlation ($\rho_{\text{fee}}$)**: Fee vs position.
-     - **Kendall's Tau ($\tau_{\text{fee}}$)**: Concordant vs discordant pair ratio.
-     - **Monte Carlo Permutation Tests (1,000 trials)**: Empirical $p$-values to verify null hypothesis rejection ($p < 0.01$).
+6. **Noise vs Rule (Statistical Significance)**:
+   - Evaluated via Spearman Rank Correlation ($\rho_{\text{fee}}$) and Kendall's Tau ($\tau_{\text{fee}}$).
+   - Verified using 1,000-trial Monte Carlo permutation null hypothesis testing ($p < 0.001$).
 
-### 📊 Scientific Gnuplot Figures
+### Scientific Gnuplot Figures
 
-The measurement pipeline includes an automated **Gnuplot 6.0** plotting suite (`scripts/generate_plots.py`), generating publication-quality figures:
+The measurement pipeline includes a standalone Gnuplot 6.0 plotting driver (`scripts/generate_plots.py`):
 
 | Figure | Description | File Path |
 |---|---|---|
 | **Figure 1** | Priority Fee Rate vs Confirmed Block Placement Percentile | [`reports/figures/fig1_fee_vs_position.png`](reports/figures/fig1_fee_vs_position.png) |
 | **Figure 2** | Disentangling FIFO Arrival vs Priority Fee Inversion | [`reports/figures/fig2_fifo_vs_fee_inversion.png`](reports/figures/fig2_fifo_vs_fee_inversion.png) |
 | **Figure 3** | Spearman Rank $\rho$ and Kendall $\tau$ across Client Forks | [`reports/figures/fig3_client_strictness.png`](reports/figures/fig3_client_strictness.png) |
-| **Figure 4** | Monte Carlo Permutation Test ($H_0$ Distribution, $p < 0.001$) | [`reports/figures/fig4_permutation_test.png`](reports/figures/fig4_permutation_test.png) |
+| **Figure 4** | Monte Carlo Permutation Test ($H_0$ Null Distribution, $p < 0.001$) | [`reports/figures/fig4_permutation_test.png`](reports/figures/fig4_permutation_test.png) |
 
 ![Figure 1: Priority Fee Rate vs Block Percentile Placement](reports/figures/fig1_fee_vs_position.png)
 ![Figure 2: Disentangling FIFO vs Priority Fee Inversion](reports/figures/fig2_fifo_vs_fee_inversion.png)
 
-### What This Experiment Deliberately Does NOT Separate:
-1. **RPC Network Transit Jitter**: Public RPC forwarding adds 5-25ms of internet routing variance before packets hit leader network interfaces.
-2. **Jito Bundle Private Tip Auctions**: Jito bundles execute through an out-of-band private Block Engine. Our experiment analyzes the leader scheduler for standard mempool transactions, not private bundle tips.
-3. **Stake-Weighted QoS (SWQoS)**: High-stake nodes receive preferential QUIC stream bandwidth during heavy network congestion.
+### Scope Boundaries (What This Experiment Deliberately Does NOT Separate):
+1. **Public RPC Transit Latency**: Packets routed through public JSON-RPC nodes experience 5-30ms internet routing jitter before reaching the leader's TPU interface.
+2. **Jito Bundle Private Auctions**: Jito bundles execute through an out-of-band private Block Engine relay. This study analyzes the validator's leader scheduler for standard mempool transactions, not private bundle tips.
+3. **Stake-Weighted QoS (SWQoS)**: High-stake nodes receive preferential QUIC stream allocation during periods of high network saturation.
 
 ---
 
-## ⚡ Safety & Spend Cap Architecture
+## Safety & Spend Cap Architecture
 
-The bounty strictly requires spending **approximately $\le 0.05$ SOL**:
-- **Atomic Pre-Check Gate**: Before broadcasting any transaction, `SpendTracker::pre_check_spend` verifies that `current_spent + estimated_fee <= cap`. If breached, dispatch is halted immediately.
-- **Micro-Budgeted Compute Limits**: Transactions set explicit compute unit limits (`300 CU`) and controlled priority prices, keeping the average transaction cost around `0.000005 - 0.000008 SOL`.
-- **Hard Config Limit**: The engine refuses to run with `--spend-cap-sol > 0.10`.
-- **Dry-Run by Default**: Unless the explicit `--live` flag is supplied along with an external keypair, the engine runs in 100% safe dry-run mode.
+The bounty specifies a budget constraint fitting within approximately 0.05 SOL:
+- **Atomic Two-Phase Spend Gate**: `SpendTracker::pre_check_spend` verifies budget limits before dispatch; `record_spend` records confirmed costs.
+- **Compute Unit Optimization**: Transactions request explicit micro-limits (`300 CU`), resulting in fees around `0.000005 - 0.000008 SOL` per transaction.
+- **Actual Experiment Spend**: Total spend across the entire campaign was **0.001175 SOL (2.4% of the 0.05 SOL limit)** across 216 confirmed transactions.
+- **Safe Defaults**: Dry-run mode by default; live broadcast requires explicit `--live` flag and an externally supplied keypair.
 
 ---
 
-## 🚀 Quick Start & Reproducibility
+## Quick Start & Reproducibility
 
-### Option 1: One-Command Execution via Docker Compose (Recommended)
+### 1. Docker Compose (One-Command Reproducibility)
 
-Judges can reproduce the entire experiment, generate reports, and launch the interactive dashboard with a single command:
+Run the full pipeline and local dashboard with one command:
 
 ```bash
-# 1. Clone repository
-git clone https://github.com/superteam-ukraine/solana-validator-ordering.git
-cd solana-validator-ordering
-
-# 2. Launch in Docker (Dry-Run + Interactive Dashboard on Port 1995)
 docker compose up
 ```
 
-Open your browser to **`http://localhost:1995`** to view the live Windows 95 interactive dashboard!
+Open `http://localhost:1995` in any browser to view the Windows 95 style interactive dashboard.
 
-### Option 2: Analyze-Only Mode (Instantly verify raw Mainnet data without network queries)
+### 2. Native Rust / Cargo Execution
 
+#### Dry-run mode (default, zero SOL spent):
 ```bash
-docker compose run --rm analyzer
+cargo run -- --dry-run --serve-dashboard --port 1995
 ```
 
-Or with native Cargo:
+#### Analyze-only mode (evaluates confirmed Mainnet data without network calls):
 ```bash
 cargo run -- --analyze-only --serve-dashboard --port 1995
 ```
 
-### Option 3: Live Mainnet Sending (Behind explicit flag & spend cap)
-
-> ⚠️ **Key Safety Guarantee**: Keys are NEVER committed to git or baked into Docker images. Keypairs must be mounted via volume or environment variable.
-
-1. Fund a keypair with at least `0.05 SOL`.
-2. Place the keypair JSON in `./keys/id.json` (gitignored).
-3. Run:
-```bash
-docker compose --profile live up
-```
-Or via Cargo:
+#### Live sending (requires explicit flag, funded keypair, and spend cap):
 ```bash
 cargo run -- --live --keypair-path ./keys/id.json --spend-cap-sol 0.05 --serve-dashboard
 ```
 
+### 3. Live Dashboard URL & Offline Viewing
+
+- **Live Production URL:** [https://reports-one-iota.vercel.app](https://reports-one-iota.vercel.app)
+- **Local Browser:** Double-click [`reports/index.html`](reports/index.html) (or `reports/dashboard.html`) to view the dashboard completely offline without running any server.
+
 ---
 
-## 🔍 Verifying Raw Data on Mainnet (For Judges)
+## Raw Data Verification Guide (For Judges)
 
-All raw JSON logs are saved under `./data/` with exact transaction signatures and slot numbers. Judges can independently verify any claim using the Solana CLI or curl:
+All 216 confirmed transactions and slot numbers are stored in `data/measurements.json` and `data/analysis.json`. Claims can be verified independently against Solana Mainnet:
 
 ```bash
-# 1. Verify a target block on Solana Mainnet
-solana block 465042429 --url https://api.mainnet-beta.solana.com
+# 1. Query confirmed block on Solana Mainnet
+solana block 465703964 --url https://api.mainnet-beta.solana.com
 
-# 2. Query individual transaction confirmation & fee
+# 2. Query individual transaction confirmation status
 curl -s -X POST -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"getTransaction","params":["<SIGNATURE>",{"encoding":"jsonParsed","maxSupportedTransactionVersion":1}]}' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getTransaction","params":["56aLprvPNEnHSMZumQxLD8rmHoE1DTpjdRKMUStaePn6nr8p9cQWqSRCs1L1r6oFE2K1WX6YGqwQXMaMMMo1aGEM",{"encoding":"jsonParsed","maxSupportedTransactionVersion":1}]}' \
   https://api.mainnet-beta.solana.com
 ```
 
 ---
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```
 .
 ├── Cargo.toml               # Rust dependencies (solana-sdk 2.1+, tokio, reqwest, clap)
-├── Dockerfile               # Multi-stage reproducible container build
-├── docker-compose.yml       # 1-command execution profiles (dry-run, analyzer, live)
-├── .gitignore               # Strict keypair (*.json, id.json) and secret exclusions
-├── .env.example             # Template environment variables
-├── README.md                # Comprehensive experiment rationale & documentation
+├── Dockerfile               # Multi-stage reproducible container with Gnuplot 6.0
+├── docker-compose.yml       # Reproducible profiles (dry-run, analyzer, live)
+├── .gitignore               # Private key (*.json, id.json) and secret exclusions
+├── README.md                # Systems engineering documentation & methodology
 ├── data/
-│   ├── measurements.json    # Complete raw Mainnet measurement dataset
-│   └── analysis.json        # Aggregated statistical scores
+│   ├── measurements.json    # Complete raw Mainnet measurement dataset (216 txs)
+│   └── analysis.json        # Statistical scores, Spearman rho, Kendall tau
 ├── reports/
-│   ├── REPORT.md            # Formal research paper & "What Went Wrong" post-mortem
-│   ├── dashboard.html       # Windows 95 interactive dashboard
-│   └── index.html           # Web report entrypoint
+│   ├── REPORT.md            # Comprehensive research report & "What Went Wrong" post-mortem
+│   ├── dashboard.html       # Windows 95 style interactive local dashboard
+│   ├── index.html           # Web report entrypoint
+│   └── figures/             # Gnuplot 6.0 scientific charts (PNG & GP script)
 ├── scripts/
-│   └── query_validators.py  # Diagnostic utility querying Mainnet cluster nodes
+│   ├── aggregate_mainnet_data.py # Block parser and on-chain signature aggregator
+│   └── generate_plots.py        # Gnuplot 6.0 figure generation driver
 └── src/
-    ├── main.rs              # CLI entrypoint, execution pipeline & safety gates
-    ├── config.rs            # Clap CLI arguments & safety bounds
-    ├── rpc.rs               # JSON-RPC client (getBlock, getLeaderSchedule, cluster discovery)
+    ├── main.rs              # CLI entrypoint, execution pipeline, and safety checks
+    ├── config.rs            # Clap CLI configuration and spend limits
+    ├── rpc.rs               # Solana JSON-RPC client (camelCase serde, getBlock)
     ├── validator_info.rs    # Client fork classifier (Agave, Jito, Firedancer, BAM)
     ├── leader_schedule.rs   # 4-slot window calculator & countdown synchronization
-    ├── tx_crafting.rs       # Controlled burst generator (Ascending, Descending, Alternating)
+    ├── tx_crafting.rs       # Controlled burst generator (independent & shared payers)
     ├── spend_tracker.rs     # Thread-safe atomic spend cap gate (<= 0.05 SOL)
-    ├── analyzer.rs          # Statistical engine (Spearman rho, Kendall tau, Monte Carlo p-val)
-    ├── report.rs            # Markdown & Windows 95 HTML dashboard generator
+    ├── analyzer.rs          # Statistical engine (Spearman rho, Kendall tau, Monte Carlo)
+    ├── report.rs            # Markdown & Windows 95 style dashboard synthesizer
     └── server.rs            # Embedded lightweight HTTP dashboard server (port 1995)
 ```
 
 ---
 
-## 📜 License
+## License
 
-MIT License. Designed and engineered for the **Superteam Ukraine** Bounty Research Track.
-
+MIT License. Engineered for the **Superteam Ukraine** Solana Bounty Track.

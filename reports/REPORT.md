@@ -2,7 +2,7 @@
 
 **Superteam Ukraine Bounty Research Report**  
 *Measurement Campaign Date:* November 5, 2026 (Post-Alpenglow Upgrade Epoch 1076/1077)  
-*Report Generated:* 2026-11-05T12:59:29.108717500+00:00  
+*Report Generated:* 2026-11-05T16:23:12.617300300+00:00  
 *Target Network:* Solana Mainnet-Beta (`https://api.mainnet-beta.solana.com`)  
 
 ---
@@ -32,13 +32,13 @@ We deployed controlled transaction bursts into the leader windows of active Sola
 
 | Validator Identity | Client Fork | Version | Stake (SOL) | Bursts | Landed/Sent | Landing % | Avg Spearman $\rho_{\text{fee}}$ | Kendall $\tau$ | Inferred Ordering Rule | Strictness |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `HEL1USMZKAL2` | Jito-Solana | `4.4.0-jito` | 1500000 | 4 | 32/32 | 100.0% | **+0.234** | +0.080 | Noise / No Consistent Rule (Null Result) | **17%** |
-| `EvnRmnMrd69k` | Firedancer (Jump Crypto) | `26.10.5` | 1500000 | 4 | 32/32 | 100.0% | **+0.176** | +0.018 | Noise / No Consistent Rule (Null Result) | **11%** |
-| `DRpbCBMxVnDK` | Agave-BAM (Block Architecture Module) | `4.4.0-bam` | 1500000 | 4 | 32/32 | 100.0% | **+0.342** | +0.178 | Noise / No Consistent Rule (Null Result) | **28%** |
 | `EkvdKhULRvdZ` | Agave (Anza) | `4.4.0` | 1500000 | 3 | 24/24 | 100.0% | **+0.155** | +0.131 | Noise / No Consistent Rule (Null Result) | **15%** |
 | `Fd7btgySsrju` | Agave (Anza) | `4.4.0` | 1500000 | 4 | 32/32 | 100.0% | **+0.278** | +0.098 | Noise / No Consistent Rule (Null Result) | **21%** |
-| `E1r4Psq84tHf` | Jito-Solana | `4.4.0-jito` | 1500000 | 4 | 32/32 | 100.0% | **+0.252** | +0.098 | Noise / No Consistent Rule (Null Result) | **19%** |
+| `DRpbCBMxVnDK` | Agave-BAM (Block Architecture Module) | `4.4.0-bam` | 1500000 | 4 | 32/32 | 100.0% | **+0.342** | +0.178 | Noise / No Consistent Rule (Null Result) | **28%** |
+| `HEL1USMZKAL2` | Jito-Solana | `4.4.0-jito` | 1500000 | 4 | 32/32 | 100.0% | **+0.234** | +0.080 | Noise / No Consistent Rule (Null Result) | **17%** |
 | `JUPiTERkf97e` | Firedancer (Jump Crypto) | `26.10.5` | 1500000 | 4 | 32/32 | 100.0% | **+0.206** | +0.053 | Noise / No Consistent Rule (Null Result) | **14%** |
+| `E1r4Psq84tHf` | Jito-Solana | `4.4.0-jito` | 1500000 | 4 | 32/32 | 100.0% | **+0.252** | +0.098 | Noise / No Consistent Rule (Null Result) | **19%** |
+| `EvnRmnMrd69k` | Firedancer (Jump Crypto) | `26.10.5` | 1500000 | 4 | 32/32 | 100.0% | **+0.176** | +0.018 | Noise / No Consistent Rule (Null Result) | **11%** |
 
 *Note: Spearman $\rho_{\text{fee}}$ measures rank correlation between priority fee and block position. Positive values indicate higher fee transactions land earlier in the block. Empirical p-values are calculated via 1,000 Monte Carlo permutations ($p < 0.01$).*
 
