@@ -39,9 +39,17 @@ pub struct Config {
     #[arg(long, default_value_t = false)]
     pub live: bool,
 
-    /// Number of transactions to send per leader window burst
+    /// Number of transactions to send per leader window burst (e.g. 8, 16, 32)
     #[arg(long, default_value_t = 8)]
     pub burst_size: usize,
+
+    /// Run dedicated Write-Lock Contention Benchmark (compares shared fee-payer vs independent fee-payers)
+    #[arg(long, default_value_t = false)]
+    pub contention_benchmark: bool,
+
+    /// Maximum number of target validators to analyze (default: 14)
+    #[arg(long, default_value_t = 14)]
+    pub max_validators: usize,
 
     /// Directory where raw measurement JSON logs will be stored
     #[arg(long, default_value = "./data")]
@@ -71,6 +79,13 @@ pub struct Config {
 impl Config {
     /// Validates the configuration for safety
     pub fn validate(&self) -> anyhow::Result<()> {
+        if self.burst_size < 2 || self.burst_size > 64 {
+            anyhow::bail!(
+                "SAFETY ERROR: --burst-size must be between 2 and 64 (got {}).",
+                self.burst_size
+            );
+        }
+
         if self.live {
             if self.keypair_path.is_none() {
                 anyhow::bail!(

@@ -43,6 +43,61 @@ pub struct CraftedTxMetadata {
 pub struct TxCrafter;
 
 impl TxCrafter {
+    /// Generates priority fee tiers spanning 100 to 10,000,000 uL/CU dynamically
+    /// for any burst size N. For N=8, preserves canonical exact tiers.
+    pub fn generate_fee_tiers(burst_size: usize, pattern: BurstPattern) -> Vec<u64> {
+        if burst_size <= 1 {
+            return vec![10_000];
+        }
+
+        match pattern {
+            BurstPattern::AscendingFee => {
+                if burst_size == 8 {
+                    vec![
+                        100,        // 0.1 uL/CU
+                        1_000,      // 1 uL/CU
+                        5_000,      // 5 uL/CU
+                        20_000,     // 20 uL/CU
+                        100_000,    // 100 uL/CU
+                        500_000,    // 500 uL/CU
+                        2_000_000,  // 2,000 uL/CU
+                        10_000_000, // 10,000 uL/CU
+                    ]
+                } else {
+                    // Logarithmic scale spanning 100 to 10,000,000 uL/CU with strictly distinct values
+                    (0..burst_size)
+                        .map(|i| {
+                            let factor = i as f64 / (burst_size - 1) as f64;
+                            let val = 100.0 * 10.0f64.powf(5.0 * factor);
+                            val.round() as u64
+                        })
+                        .collect()
+                }
+            }
+            BurstPattern::DescendingFee => {
+                let mut tiers = Self::generate_fee_tiers(burst_size, BurstPattern::AscendingFee);
+                tiers.reverse();
+                tiers
+            }
+            BurstPattern::AlternatingFee => {
+                let asc = Self::generate_fee_tiers(burst_size, BurstPattern::AscendingFee);
+                let mut tiers = Vec::with_capacity(burst_size);
+                let half = burst_size / 2;
+                for i in 0..burst_size {
+                    if i % 2 == 0 {
+                        tiers.push(asc[i / 2]);
+                    } else {
+                        tiers.push(asc[burst_size - 1 - (i / 2).min(half)]);
+                    }
+                }
+                tiers
+            }
+            BurstPattern::UniformFee => {
+                vec![10_000; burst_size]
+            }
+        }
+    }
+
     /// Crafts a burst of test transactions with precisely controlled priority fees and metadata
     pub fn build_burst(
         payer: &Keypair,
@@ -53,46 +108,10 @@ impl TxCrafter {
     ) -> Vec<CraftedTxMetadata> {
         let memo_program_pubkey = Pubkey::from_str(MEMO_PROGRAM_ID).unwrap();
         let mut burst = Vec::with_capacity(burst_size);
-
-        // Standard priority fee tiers (micro-lamports per Compute Unit)
-        // 1 micro-lamport = 0.000001 lamports. At 300 CU, 10,000 uL/CU = 3 lamports extra fee.
-        let fee_tiers = match pattern {
-            BurstPattern::AscendingFee => {
-                vec![
-                    100,      // 0.1 uL/CU
-                    1_000,    // 1 uL/CU
-                    5_000,    // 5 uL/CU
-                    20_000,   // 20 uL/CU
-                    100_000,  // 100 uL/CU
-                    500_000,  // 500 uL/CU
-                    2_000_000,// 2,000 uL/CU
-                    10_000_000,// 10,000 uL/CU
-                ]
-            }
-            BurstPattern::DescendingFee => {
-                vec![
-                    10_000_000,
-                    2_000_000,
-                    500_000,
-                    100_000,
-                    20_000,
-                    5_000,
-                    1_000,
-                    100,
-                ]
-            }
-            BurstPattern::AlternatingFee => {
-                vec![
-                    100, 5_000_000, 200, 5_000_000, 300, 5_000_000, 400, 5_000_000,
-                ]
-            }
-            BurstPattern::UniformFee => {
-                vec![10_000; burst_size]
-            }
-        };
+        let fee_tiers = Self::generate_fee_tiers(burst_size, pattern);
 
         for i in 0..burst_size {
-            let priority_fee = fee_tiers[i % fee_tiers.len()];
+            let priority_fee = fee_tiers[i];
             // 1,000 CUs provides sufficient budget for SPL Memo (~800 CUs) while keeping lamport spend negligible
             let cu_limit: u32 = 1_000;
 
@@ -153,7 +172,6 @@ impl TxCrafter {
 
     /// Crafts an independent-payer burst where each transaction has a unique fee-payer keypair.
     /// This eliminates fee-payer write-lock collisions and allows true multi-thread scheduling evaluation!
-    #[allow(dead_code)]
     pub fn build_independent_burst(
         payers: &[Keypair],
         recent_blockhash: solana_sdk::hash::Hash,
@@ -163,16 +181,10 @@ impl TxCrafter {
         let memo_program_pubkey = Pubkey::from_str(MEMO_PROGRAM_ID).unwrap();
         let burst_size = payers.len();
         let mut burst = Vec::with_capacity(burst_size);
-
-        let fee_tiers = match pattern {
-            BurstPattern::AscendingFee => vec![100, 1_000, 5_000, 20_000, 100_000, 500_000, 2_000_000, 10_000_000],
-            BurstPattern::DescendingFee => vec![10_000_000, 2_000_000, 500_000, 100_000, 20_000, 5_000, 1_000, 100],
-            BurstPattern::AlternatingFee => vec![100, 5_000_000, 200, 5_000_000, 300, 5_000_000, 400, 5_000_000],
-            BurstPattern::UniformFee => vec![10_000; burst_size],
-        };
+        let fee_tiers = Self::generate_fee_tiers(burst_size, pattern);
 
         for (i, payer) in payers.iter().enumerate() {
-            let priority_fee = fee_tiers[i % fee_tiers.len()];
+            let priority_fee = fee_tiers[i];
             // 1,000 CUs provides sufficient budget for SPL Memo (~800 CUs)
             let cu_limit: u32 = 1_000;
 
@@ -226,6 +238,33 @@ impl TxCrafter {
 
         burst
     }
+
+    /// Crafts a side-by-side contention benchmark pair:
+    /// (1) Independent-payer burst (zero write-lock collision, evaluates parallel queues)
+    /// (2) Shared-payer burst (same payer account, forces Sealevel write-lock serialization)
+    pub fn build_contention_pair(
+        master_payer: &Keypair,
+        recent_blockhash: solana_sdk::hash::Hash,
+        burst_id_prefix: &str,
+        burst_size: usize,
+        pattern: BurstPattern,
+    ) -> (Vec<CraftedTxMetadata>, Vec<CraftedTxMetadata>) {
+        let independent_payers: Vec<Keypair> = (0..burst_size).map(|_| Keypair::new()).collect();
+        let indep_burst = Self::build_independent_burst(
+            &independent_payers,
+            recent_blockhash,
+            &format!("{}-indep", burst_id_prefix),
+            pattern,
+        );
+        let shared_burst = Self::build_burst(
+            master_payer,
+            recent_blockhash,
+            &format!("{}-shared", burst_id_prefix),
+            burst_size,
+            pattern,
+        );
+        (indep_burst, shared_burst)
+    }
 }
 
 #[cfg(test)]
@@ -256,5 +295,55 @@ mod tests {
         let burst = TxCrafter::build_independent_burst(&payers, bh, "indep-burst", BurstPattern::AscendingFee);
         assert_eq!(burst.len(), 4);
         assert!(burst[0].memo_payload.contains("independent=true"));
+    }
+
+    #[test]
+    fn test_high_density_burst_generation_16() {
+        let payer = Keypair::new();
+        let bh = solana_sdk::hash::Hash::default();
+
+        let burst_16 = TxCrafter::build_burst(&payer, bh, "dense-burst-16", 16, BurstPattern::AscendingFee);
+        assert_eq!(burst_16.len(), 16);
+        assert_eq!(burst_16[0].priority_fee_micro_lamports, 100);
+        assert_eq!(burst_16[15].priority_fee_micro_lamports, 10_000_000);
+        // Verify strictly monotonic ordering
+        for i in 0..15 {
+            assert!(
+                burst_16[i].priority_fee_micro_lamports < burst_16[i + 1].priority_fee_micro_lamports,
+                "Fees must be strictly increasing: {} vs {}",
+                burst_16[i].priority_fee_micro_lamports,
+                burst_16[i + 1].priority_fee_micro_lamports
+            );
+        }
+    }
+
+    #[test]
+    fn test_high_density_burst_generation_32() {
+        let payer = Keypair::new();
+        let bh = solana_sdk::hash::Hash::default();
+
+        let burst_32 = TxCrafter::build_burst(&payer, bh, "dense-burst-32", 32, BurstPattern::DescendingFee);
+        assert_eq!(burst_32.len(), 32);
+        assert_eq!(burst_32[0].priority_fee_micro_lamports, 10_000_000);
+        assert_eq!(burst_32[31].priority_fee_micro_lamports, 100);
+        for i in 0..31 {
+            assert!(
+                burst_32[i].priority_fee_micro_lamports > burst_32[i + 1].priority_fee_micro_lamports,
+                "Fees must be strictly decreasing: {} vs {}",
+                burst_32[i].priority_fee_micro_lamports,
+                burst_32[i + 1].priority_fee_micro_lamports
+            );
+        }
+    }
+
+    #[test]
+    fn test_contention_pair_generation() {
+        let master = Keypair::new();
+        let bh = solana_sdk::hash::Hash::default();
+        let (indep, shared) = TxCrafter::build_contention_pair(&master, bh, "contention-test", 8, BurstPattern::AscendingFee);
+        assert_eq!(indep.len(), 8);
+        assert_eq!(shared.len(), 8);
+        assert!(indep[0].memo_payload.contains("independent=true"));
+        assert!(!shared[0].memo_payload.contains("independent=true"));
     }
 }

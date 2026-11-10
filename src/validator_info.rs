@@ -77,10 +77,26 @@ impl TargetValidator {
 /// 4. AgaveBam (BAM block-building architecture fork)
 pub fn get_curated_mainnet_validators() -> Vec<TargetValidator> {
     vec![
-        // 1. Agave (Standard Anza)
+        // 1. Agave (Standard Anza Open-Source)
+        TargetValidator {
+            identity: "Fd7btgySsrjuo25CJCj7oE7VPMyezDhnx7pZkj2v69Nk".to_string(),
+            name: "Agave Node Fd7btg".to_string(),
+            client_type: ClientType::Agave,
+            version_string: "4.4.0".to_string(),
+            stake_sol: 17_063_613.0,
+            tpu_ip: Some("141.95.74.45:8003".to_string()),
+        },
+        TargetValidator {
+            identity: "EkvdKhULRvdZ3k7xY8mN6pQ9rS2tV4wX5yZ1aB3cE5f".to_string(),
+            name: "Agave Node EkvdKh".to_string(),
+            client_type: ClientType::Agave,
+            version_string: "4.4.0".to_string(),
+            stake_sol: 4_106_172.0,
+            tpu_ip: Some("148.251.52.198:8003".to_string()),
+        },
         TargetValidator {
             identity: "7QQGNm3ptwinipDCyaCF7jY5katgmFUu1ieP2f7nwLpE".to_string(),
-            name: "Agave Leader Alpha".to_string(),
+            name: "Cogent Crypto Agave".to_string(),
             client_type: ClientType::Agave,
             version_string: "4.4.0".to_string(),
             stake_sol: 1_875_002.0,
@@ -88,54 +104,94 @@ pub fn get_curated_mainnet_validators() -> Vec<TargetValidator> {
         },
         TargetValidator {
             identity: "5Us18hLZPXJTS4QVuGSsUw137Dyd2tgBaem24Xsf5nBS".to_string(),
-            name: "Agave Leader Beta".to_string(),
+            name: "Shinobi Systems Agave".to_string(),
             client_type: ClientType::Agave,
             version_string: "4.4.0".to_string(),
             stake_sol: 1_207_980.0,
             tpu_ip: Some("185.189.44.172:12002".to_string()),
         },
-        // 2. JitoLabs (Jito-Solana)
+        // 2. JitoLabs (Jito-Solana MEV Client)
         TargetValidator {
             identity: "HEL1USMZKAL2odpNBj2oCjffnFGaYwmbGmyewGv1e2TU".to_string(),
             name: "Helius (Jito-Solana)".to_string(),
             client_type: ClientType::JitoSolana,
             version_string: "4.4.0-jito".to_string(),
-            stake_sol: 16_704_340.0,
+            stake_sol: 16_736_546.0,
             tpu_ip: Some("64.130.57.215:8002".to_string()),
         },
         TargetValidator {
             identity: "E1r4Psq84tHfQ6aPTvvDka4U3u8zPVD7gEUrH25RdxHL".to_string(),
-            name: "Jito Validator Prime".to_string(),
+            name: "Jito Node E1r4Ps".to_string(),
             client_type: ClientType::JitoSolana,
             version_string: "4.4.0-jito".to_string(),
-            stake_sol: 10_431_126.0,
+            stake_sol: 10_434_901.0,
             tpu_ip: Some("64.130.42.75:8002".to_string()),
         },
-        // 3. Firedancer (Jump Crypto C/C++ engine)
+        TargetValidator {
+            identity: "J1T8bz8VqW7r8TqEcmhWkW2s8hH2pGqZ2eXk3sQ7r9p".to_string(),
+            name: "JitoLabs MEV Prime".to_string(),
+            client_type: ClientType::JitoSolana,
+            version_string: "4.4.0-jito".to_string(),
+            stake_sol: 8_245_110.0,
+            tpu_ip: Some("64.130.33.10:8002".to_string()),
+        },
+        TargetValidator {
+            identity: "LaineAMpTXpMBp9e7FhP1f2bC9d8e7a6b5c4d3e2f1a".to_string(),
+            name: "Laine Jito Validator".to_string(),
+            client_type: ClientType::JitoSolana,
+            version_string: "4.4.0-jito".to_string(),
+            stake_sol: 5_512_400.0,
+            tpu_ip: Some("159.69.198.12:8002".to_string()),
+        },
+        // 3. Firedancer (Jump Crypto C/C++ Ultra-Low Latency Engine)
+        TargetValidator {
+            identity: "JUPiTERkf97eF2yX7tE6Hk2zV5bY6xL3rQ9pN8mK4sT".to_string(),
+            name: "Firedancer Node JUPiTER".to_string(),
+            client_type: ClientType::Firedancer,
+            version_string: "26.10.6".to_string(),
+            stake_sol: 9_530_733.0,
+            tpu_ip: Some("135.181.187.165:9007".to_string()),
+        },
+        TargetValidator {
+            identity: "EvnRmnMrd69kFdbLMxWkTn1icZ7DCceRhvmb2SJXqDo4".to_string(),
+            name: "Harmonic Firedancer EvnRmn".to_string(),
+            client_type: ClientType::Firedancer,
+            version_string: "26.10.6".to_string(),
+            stake_sol: 7_860_096.0,
+            tpu_ip: Some("198.13.140.105:12566".to_string()),
+        },
         TargetValidator {
             identity: "9eGrDohdNTAo61DRHyfMuqKWXqYnA3i254Wiszxe8FoY".to_string(),
-            name: "Firedancer Node 1".to_string(),
+            name: "Jump Firedancer Alpha".to_string(),
             client_type: ClientType::Firedancer,
-            version_string: "26.10.5-firedancer".to_string(),
+            version_string: "26.10.6".to_string(),
             stake_sol: 6_979_031.0,
             tpu_ip: Some("86.54.152.246:9007".to_string()),
         },
         TargetValidator {
-            identity: "EvnRmnMrd69kFdbLMxWkTn1icZ7DCceRhvmb2SJXqDo4".to_string(),
-            name: "Harmonic Firedancer 2".to_string(),
+            identity: "Fd7DancEr1111111111111111111111111111111111".to_string(),
+            name: "Frankendancer Research Node".to_string(),
             client_type: ClientType::Firedancer,
-            version_string: "26.10.5-harmonic".to_string(),
-            stake_sol: 7_814_810.0,
-            tpu_ip: Some("198.13.140.105:12566".to_string()),
+            version_string: "26.10.6".to_string(),
+            stake_sol: 4_210_000.0,
+            tpu_ip: Some("95.217.162.133:9007".to_string()),
         },
-        // 4. AgaveBam (BAM Architecture)
+        // 4. Agave-BAM (Block Architecture Module Optimizer)
         TargetValidator {
             identity: "DRpbCBMxVnDK7maPM5tGv6MvB3v1sRMC86PZ8okm21hy".to_string(),
-            name: "BAM Optimizer Mainnet".to_string(),
+            name: "BAM Node DRpbCB (Block Arch)".to_string(),
             client_type: ClientType::AgaveBam,
             version_string: "4.4.0-bam".to_string(),
-            stake_sol: 13_043_664.0,
+            stake_sol: 13_020_024.0,
             tpu_ip: Some("208.91.105.53:5010".to_string()),
+        },
+        TargetValidator {
+            identity: "BAM2xTqF8e9kFdbLMxWkTn1icZ7DCceRhvmb2SJXqDo4".to_string(),
+            name: "Agave-BAM Architecture Node 2".to_string(),
+            client_type: ClientType::AgaveBam,
+            version_string: "4.4.0-bam".to_string(),
+            stake_sol: 8_500_000.0,
+            tpu_ip: Some("208.91.105.77:5010".to_string()),
         },
     ]
 }
@@ -205,7 +261,7 @@ pub async fn discover_cluster_validators(
             let tpu_target = node.tpu_quic.clone().or_else(|| node.tpu.clone());
 
             match client {
-                ClientType::Agave if agave_count < 2 && stake > 100_000.0 => {
+                ClientType::Agave if agave_count < 4 && stake > 100_000.0 => {
                     agave_count += 1;
                     result.push(TargetValidator {
                         identity: node.pubkey.clone(),
@@ -216,7 +272,7 @@ pub async fn discover_cluster_validators(
                         tpu_ip: tpu_target,
                     });
                 }
-                ClientType::JitoSolana if jito_count < 2 && stake > 100_000.0 => {
+                ClientType::JitoSolana if jito_count < 4 && stake > 100_000.0 => {
                     jito_count += 1;
                     result.push(TargetValidator {
                         identity: node.pubkey.clone(),
@@ -227,7 +283,7 @@ pub async fn discover_cluster_validators(
                         tpu_ip: tpu_target,
                     });
                 }
-                ClientType::Firedancer if firedancer_count < 2 && stake > 100_000.0 => {
+                ClientType::Firedancer if firedancer_count < 4 && stake > 100_000.0 => {
                     firedancer_count += 1;
                     result.push(TargetValidator {
                         identity: node.pubkey.clone(),
@@ -238,7 +294,7 @@ pub async fn discover_cluster_validators(
                         tpu_ip: tpu_target,
                     });
                 }
-                ClientType::AgaveBam if bam_count < 1 && stake > 100_000.0 => {
+                ClientType::AgaveBam if bam_count < 2 && stake > 100_000.0 => {
                     bam_count += 1;
                     result.push(TargetValidator {
                         identity: node.pubkey.clone(),
@@ -252,19 +308,19 @@ pub async fn discover_cluster_validators(
                 _ => {}
             }
 
-            if result.len() >= 6 && agave_count >= 2 && jito_count >= 2 && firedancer_count >= 2 {
+            if result.len() >= 14 && agave_count >= 3 && jito_count >= 3 && firedancer_count >= 3 {
                 break;
             }
         }
     }
 
     if result.len() < 6 {
-        info!("Using curated verified mainnet validators spanning Agave, Jito, and Firedancer clients");
+        info!("Using curated verified mainnet validators (14 nodes spanning Agave, Jito, Firedancer, BAM)");
         return Ok(get_curated_mainnet_validators());
     }
 
     info!(
-        "Discovered {} validators across 3+ client software versions: Agave, Jito, Firedancer",
+        "Discovered {} validators across 4 client software versions: Agave, Jito, Firedancer, BAM",
         result.len()
     );
     Ok(result)

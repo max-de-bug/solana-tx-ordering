@@ -175,10 +175,31 @@ cargo run -- --analyze-only --serve-dashboard --port 1995
 cargo run -- --live --keypair-path ./keys/id.json --spend-cap-sol 0.05 --serve-dashboard
 ```
 
+#### Write-Lock Contention Benchmark (Extension B: Shared vs Independent Payers):
+```bash
+cargo run -- --dry-run --contention-benchmark --max-validators 4
+```
+
+#### High-Density Saturation Burst (Extension C: N=16 or N=32 txs):
+```bash
+cargo run -- --dry-run --burst-size 16 --max-validators 4
+```
+
 ### 3. Live Dashboard URL & Offline Viewing
 
 - **Live Production URL:** [https://solana-tx-ordering.vercel.app](https://solana-tx-ordering.vercel.app)
 - **Local Browser:** Double-click [`reports/index.html`](reports/index.html) (or `reports/dashboard.html`) to view the dashboard completely offline without running any server.
+
+---
+
+## Advanced Extensions & Deep-Dive Benchmarks
+
+The research suite includes four enterprise extensions designed to stress-test scheduler edge cases:
+
+1. **Extension A: 1,000 CU Execution Budget**: Sets `cu_limit = 1,000` to guarantee SPL Memo instruction completion on-chain (`Status: Success`) while maintaining microscopic priority fee spend (< 0.000006 SOL/tx).
+2. **Extension B: Dedicated Write-Lock Contention Benchmark (`--contention-benchmark`)**: Concurrently evaluates independent fee-payers (`build_independent_burst`, zero lock contention) against shared fee-payers (`build_burst`, Sealevel Account Lock Manager serialization), quantifying the exact block index latency shift introduced by account write locks.
+3. **Extension C: High-Density Saturation Scaling (`--burst-size 16/32`)**: Dynamically scales priority fee tiers along a smooth logarithmic curve ($10^2$ to $10^7$ $\mu$L/CU) to stress-test priority queue depth in Firedancer's `fd_pack` and Agave's `BankingStage`.
+4. **Extension D: Expanded 14-Validator Cluster Coverage (`--max-validators 14`)**: Features 14 verified high-stake validators spanning all four major client software families (`Agave`, `Jito-Solana`, `Firedancer`, `Agave-BAM`).
 
 ---
 

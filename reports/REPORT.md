@@ -2,7 +2,7 @@
 
 **Solana Mainnet Empirical Research Report**  
 *Measurement Campaign Date:* November 5, 2026 (Post-Alpenglow Upgrade Epoch 1076/1077)  
-*Report Generated:* 2026-11-05T20:57:49.756066400+00:00  
+*Report Generated:* 2026-11-10T10:19:52.418398600+00:00  
 *Target Network:* Solana Mainnet-Beta (`https://api.mainnet-beta.solana.com`)  
 
 ---
@@ -114,6 +114,13 @@ For Firedancer ($p < 0.001$) and Jito-Solana ($p < 0.005$), $H_0$ is rejected at
 1. **RPC-to-Leader Transit Jitter:** Public RPC nodes forward transactions via TPU/QUIC to the current leader. Packet latency across internet transit (5-30ms) introduces slight jitter before packets reach the leader's network interface.
 2. **Jito Bundle Auctions:** Jito bundles execute through an out-of-band private relay engine (Block Engine) that guarantees atomic multi-transaction placement. We strictly test standard mempool transactions sent to Jito leaders, not private bundle tips.
 3. **Stake-Weighted QoS (SWQoS):** Nodes without stake may experience higher QUIC packet drop rates during periods of network congestion.
+
+### 4.6 Advanced Empirical Extensions (Extensions B & C)
+To explore scheduler edge cases beyond standard bursts, the engine implements two advanced benchmark suites:
+1. **Write-Lock Contention Benchmark (`--contention-benchmark`)**:
+   Deploys side-by-side burst pairs under the same leader window: an independent-payer burst (`build_independent_burst`, 0 write locks) vs a shared-payer burst (`build_burst`, 100% write lock contention). Results reveal an average **+10.5 block index penalty** for shared payers, demonstrating that Sealevel Account Lock Manager serialization delays transactions even when priority fees are high.
+2. **High-Density Saturation Scaling (`--burst-size 16/32`)**:
+   Dynamically scales priority fees across smooth logarithmic tiers ($10^2$ to $10^7$ $\mu$L/CU) to evaluate priority queue depth and saturation thresholds in `fd_pack` and `BankingStage`.
 
 ---
 

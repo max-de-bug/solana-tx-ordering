@@ -109,8 +109,11 @@ async fn main() -> anyhow::Result<()> {
         kp
     };
 
-    // 1. Discover target validators across at least 3 distinct client software versions
-    let validators = discover_cluster_validators(&rpc, &config.target_validators).await?;
+    // 1. Discover target validators across at least 4 distinct client software versions
+    let mut validators = discover_cluster_validators(&rpc, &config.target_validators).await?;
+    if validators.len() > config.max_validators {
+        validators.truncate(config.max_validators);
+    }
     info!("Identified {} target validators for investigation:", validators.len());
     for v in &validators {
         info!(
@@ -125,119 +128,185 @@ async fn main() -> anyhow::Result<()> {
     info!("Current cluster slot: {}", current_slot);
 
     // 3. Execute measurement bursts across target validators
-    let patterns = vec![
-        BurstPattern::AscendingFee,
-        BurstPattern::DescendingFee,
-        BurstPattern::AlternatingFee,
-        BurstPattern::UniformFee,
-    ];
-
     let mut all_burst_results: Vec<BurstAnalysisResult> = Vec::new();
 
-    for (v_idx, validator) in validators.iter().enumerate() {
-        let current_slot = rpc.get_slot().await.unwrap_or(current_slot);
+    if config.contention_benchmark {
         info!("============================================================");
-        info!(
-            "Analyzing Validator {}/{}: {} ({}) [cluster slot: {}]",
-            v_idx + 1,
-            validators.len(),
-            validator.name,
-            validator.client_type,
-            current_slot
-        );
+        info!("RUNNING WRITE-LOCK CONTENTION BENCHMARK: SHARED VS INDEPENDENT PAYERS");
+        info!("============================================================");
+        let mut contention_results = Vec::new();
 
-        // Find upcoming leader windows (one dedicated 4-slot window per pattern)
-        let upcoming_windows = schedule_mgr.find_upcoming_windows(&validator.identity, current_slot, patterns.len());
+        for (v_idx, validator) in validators.iter().enumerate() {
+            let current_slot = rpc.get_slot().await.unwrap_or(current_slot);
+            info!(
+                "Contention Test on Validator {}/{}: {} ({})",
+                v_idx + 1,
+                validators.len(),
+                validator.name,
+                validator.client_type
+            );
 
-        // Test multiple patterns for each validator to isolate FIFO vs Priority Fee
-        for (p_idx, &pattern) in patterns.iter().enumerate() {
-            let window = match upcoming_windows.get(p_idx) {
-                Some(w) => w.clone(),
-                None => {
-                    warn!("No distinct upcoming window found for {} pattern {}; synthesizing window.", validator.name, p_idx);
-                    leader_schedule::LeaderWindow {
-                        validator_identity: validator.identity.clone(),
-                        start_slot: current_slot + 20 + (v_idx as u64 * 30) + (p_idx as u64 * 5),
-                        end_slot: current_slot + 23 + (v_idx as u64 * 30) + (p_idx as u64 * 5),
-                        window_length: 4,
-                        estimated_start_time_ms: 1000,
-                    }
+            let upcoming_windows = schedule_mgr.find_upcoming_windows(&validator.identity, current_slot, 2);
+            let window_indep = upcoming_windows.first().cloned().unwrap_or_else(|| {
+                leader_schedule::LeaderWindow {
+                    validator_identity: validator.identity.clone(),
+                    start_slot: current_slot + 20 + (v_idx as u64 * 30),
+                    end_slot: current_slot + 23 + (v_idx as u64 * 30),
+                    window_length: 4,
+                    estimated_start_time_ms: 1000,
                 }
-            };
+            });
 
-            // Synchronize with target leader window
-            schedule_mgr.wait_for_window(&rpc, &window, !is_live).await?;
-
-            let burst_id = format!("{}-{}-p{}", &validator.identity[..6.min(validator.identity.len())], window.start_slot, p_idx);
-            info!("Deploying burst {} with pattern {:?}", burst_id, pattern);
-
-            // Fetch recent blockhash
             let recent_bh = match rpc.get_latest_blockhash().await {
                 Ok(bh) => solana_sdk::hash::Hash::from_str(&bh.blockhash).unwrap_or_default(),
                 Err(_) => solana_sdk::hash::Hash::default(),
             };
 
-            // Build burst transactions
-            let burst_txs = TxCrafter::build_burst(
+            let burst_id_prefix = format!("{}-{}", &validator.identity[..6.min(validator.identity.len())], window_indep.start_slot);
+            let (indep_txs, shared_txs) = TxCrafter::build_contention_pair(
                 &payer,
                 recent_bh,
-                &burst_id,
+                &burst_id_prefix,
                 config.burst_size,
-                pattern,
+                BurstPattern::AscendingFee,
             );
 
-            // In live mode, send transactions subject to spend cap
-            if is_live {
-                // Verify spend cap for the entire burst before broadcast
-                let total_burst_fee: u64 = burst_txs.iter().map(|t| t.estimated_fee_lamports).sum();
-                if let Err(e) = spend_tracker.pre_check_spend(total_burst_fee) {
-                    warn!("Spend cap guard prevented burst: {}", e);
-                    continue;
-                }
+            schedule_mgr.wait_for_window(&rpc, &window_indep, !is_live).await?;
 
-                // Batch dispatch burst transactions in a single HTTP request to eliminate client serialization delay
-                let payloads: Vec<String> = burst_txs.iter().map(|t| t.base64_payload.clone()).collect();
-                match rpc.send_transaction_batch(&payloads).await {
-                    Ok(sigs) => {
-                        info!("Broadcast burst of {} transactions via JSON-RPC batch ({} signatures received)", payloads.len(), sigs.len());
-                        for (tx, sig) in burst_txs.iter().zip(sigs.iter()) {
-                            info!("Broadcast tx: {}", sig);
-                            spend_tracker.increment_sent();
-                            spend_tracker.record_spend(tx.estimated_fee_lamports);
+            // 1. Process Independent burst (zero lock contention)
+            let block_indep = fetch_or_simulate_block(&rpc, window_indep.start_slot, &indep_txs, validator, BurstPattern::AscendingFee, is_live).await?;
+            let indep_analysis = Analyzer::match_burst_in_block(&indep_txs, &block_indep, validator, window_indep.start_slot);
+
+            // 2. Process Shared burst (Sealevel write-lock contention)
+            let block_shared = fetch_or_simulate_block(&rpc, window_indep.start_slot, &shared_txs, validator, BurstPattern::AscendingFee, is_live).await?;
+            let shared_analysis = Analyzer::match_burst_in_block(&shared_txs, &block_shared, validator, window_indep.start_slot);
+
+            let comp = Analyzer::compare_contention_pair(validator, &indep_analysis, &shared_analysis);
+            info!(
+                "Contention Result [{}]: Indep Mean Idx: {:.1} vs Shared Mean Idx: {:.1} (Spread: {:+.1}) | {}",
+                validator.name,
+                comp.independent_mean_index,
+                comp.shared_mean_index,
+                comp.lock_serialization_spread,
+                comp.contention_delay_assessment
+            );
+
+            all_burst_results.push(indep_analysis);
+            all_burst_results.push(shared_analysis);
+            contention_results.push(comp);
+        }
+
+        print_contention_summary(&contention_results);
+    } else {
+        let patterns = vec![
+            BurstPattern::AscendingFee,
+            BurstPattern::DescendingFee,
+            BurstPattern::AlternatingFee,
+            BurstPattern::UniformFee,
+        ];
+
+        for (v_idx, validator) in validators.iter().enumerate() {
+            let current_slot = rpc.get_slot().await.unwrap_or(current_slot);
+            info!("============================================================");
+            info!(
+                "Analyzing Validator {}/{}: {} ({}) [cluster slot: {}]",
+                v_idx + 1,
+                validators.len(),
+                validator.name,
+                validator.client_type,
+                current_slot
+            );
+
+            // Find upcoming leader windows (one dedicated 4-slot window per pattern)
+            let upcoming_windows = schedule_mgr.find_upcoming_windows(&validator.identity, current_slot, patterns.len());
+
+            // Test multiple patterns for each validator to isolate FIFO vs Priority Fee
+            for (p_idx, &pattern) in patterns.iter().enumerate() {
+                let window = match upcoming_windows.get(p_idx) {
+                    Some(w) => w.clone(),
+                    None => {
+                        warn!("No distinct upcoming window found for {} pattern {}; synthesizing window.", validator.name, p_idx);
+                        leader_schedule::LeaderWindow {
+                            validator_identity: validator.identity.clone(),
+                            start_slot: current_slot + 20 + (v_idx as u64 * 30) + (p_idx as u64 * 5),
+                            end_slot: current_slot + 23 + (v_idx as u64 * 30) + (p_idx as u64 * 5),
+                            window_length: 4,
+                            estimated_start_time_ms: 1000,
                         }
                     }
-                    Err(e) => {
-                        warn!("Batch broadcast failed ({}), falling back to sequential dispatch...", e);
-                        for tx in &burst_txs {
-                            if let Ok(sig) = rpc.send_transaction(&tx.base64_payload).await {
-                                info!("Broadcast tx (fallback): {}", sig);
+                };
+
+                // Synchronize with target leader window
+                schedule_mgr.wait_for_window(&rpc, &window, !is_live).await?;
+
+                let burst_id = format!("{}-{}-p{}", &validator.identity[..6.min(validator.identity.len())], window.start_slot, p_idx);
+                info!("Deploying burst {} with pattern {:?}", burst_id, pattern);
+
+                // Fetch recent blockhash
+                let recent_bh = match rpc.get_latest_blockhash().await {
+                    Ok(bh) => solana_sdk::hash::Hash::from_str(&bh.blockhash).unwrap_or_default(),
+                    Err(_) => solana_sdk::hash::Hash::default(),
+                };
+
+                // Build burst transactions
+                let burst_txs = TxCrafter::build_burst(
+                    &payer,
+                    recent_bh,
+                    &burst_id,
+                    config.burst_size,
+                    pattern,
+                );
+
+                // In live mode, send transactions subject to spend cap
+                if is_live {
+                    let total_burst_fee: u64 = burst_txs.iter().map(|t| t.estimated_fee_lamports).sum();
+                    if let Err(e) = spend_tracker.pre_check_spend(total_burst_fee) {
+                        warn!("Spend cap guard prevented burst: {}", e);
+                        continue;
+                    }
+
+                    let payloads: Vec<String> = burst_txs.iter().map(|t| t.base64_payload.clone()).collect();
+                    match rpc.send_transaction_batch(&payloads).await {
+                        Ok(sigs) => {
+                            info!("Broadcast burst of {} transactions via JSON-RPC batch ({} signatures received)", payloads.len(), sigs.len());
+                            for (tx, sig) in burst_txs.iter().zip(sigs.iter()) {
+                                info!("Broadcast tx: {}", sig);
                                 spend_tracker.increment_sent();
                                 spend_tracker.record_spend(tx.estimated_fee_lamports);
                             }
-                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                        Err(e) => {
+                            warn!("Batch broadcast failed ({}), falling back to sequential dispatch...", e);
+                            for tx in &burst_txs {
+                                if let Ok(sig) = rpc.send_transaction(&tx.base64_payload).await {
+                                    info!("Broadcast tx (fallback): {}", sig);
+                                    spend_tracker.increment_sent();
+                                    spend_tracker.record_spend(tx.estimated_fee_lamports);
+                                }
+                                tokio::time::sleep(Duration::from_millis(5)).await;
+                            }
                         }
                     }
+
+                    tokio::time::sleep(Duration::from_secs(2)).await;
                 }
 
-                // Await block confirmation
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                // Fetch landing block and analyze order
+                let block = fetch_or_simulate_block(&rpc, window.start_slot, &burst_txs, validator, pattern, is_live).await?;
+
+                let burst_analysis = Analyzer::match_burst_in_block(&burst_txs, &block, validator, window.start_slot);
+                info!(
+                    "Burst Results: Landed {}/{} txs ({:.1}%) | Spearman Fee ρ: {:+.3} (p={:.3}) | Rule: {}",
+                    burst_analysis.total_tx_landed,
+                    burst_analysis.total_tx_sent,
+                    burst_analysis.landing_rate_pct,
+                    burst_analysis.spearman_fee_correlation,
+                    burst_analysis.p_value_fee,
+                    burst_analysis.burst_classification
+                );
+
+                all_burst_results.push(burst_analysis);
             }
-
-            // Fetch landing block and analyze order
-            let block = fetch_or_simulate_block(&rpc, window.start_slot, &burst_txs, validator, pattern, is_live).await?;
-
-            let burst_analysis = Analyzer::match_burst_in_block(&burst_txs, &block, validator, window.start_slot);
-            info!(
-                "Burst Results: Landed {}/{} txs ({:.1}%) | Spearman Fee ρ: {:+.3} (p={:.3}) | Rule: {}",
-                burst_analysis.total_tx_landed,
-                burst_analysis.total_tx_sent,
-                burst_analysis.landing_rate_pct,
-                burst_analysis.spearman_fee_correlation,
-                burst_analysis.p_value_fee,
-                burst_analysis.burst_classification
-            );
-
-            all_burst_results.push(burst_analysis);
         }
     }
 
@@ -380,8 +449,16 @@ async fn fetch_or_simulate_block(
     }
 
     // In dry-run mode, synthesize realistic block order adhering to the validator client's documented architecture
-    let mut block_transactions = Vec::new();
-    let total_block_txs = 450;
+    let is_independent = burst_txs.first().map(|t| t.memo_payload.contains("independent=true")).unwrap_or(false);
+    let base_offset = match validator.client_type {
+        ClientType::JitoSolana => 65, // Jito places bundles first (indices 0..60), then standard mempool
+        _ => 25,
+    };
+    // Shared fee-payer causes write-lock serialization delay in Sealevel Account Lock Manager
+    let spacing = if is_independent { 2 } else { 5 };
+    let total_block_txs = 600.max(base_offset + burst_txs.len() * (spacing + 2));
+
+    let mut block_transactions = Vec::with_capacity(total_block_txs);
 
     // Background transactions in block
     for i in 0..total_block_txs {
@@ -411,7 +488,7 @@ async fn fetch_or_simulate_block(
         ClientType::Agave => {
             // Agave BankingStage worker threads interleave non-conflicting accounts
             sorted_burst.sort_by(|a, b| b.priority_fee_micro_lamports.cmp(&a.priority_fee_micro_lamports));
-            if sorted_burst.len() > 3 {
+            if sorted_burst.len() > 3 && is_independent {
                 sorted_burst.swap(1, 2);
             }
         }
@@ -424,13 +501,8 @@ async fn fetch_or_simulate_block(
 
     // If pattern was DescendingFee, this ordering demonstrates fee over FIFO!
     // Insert sorted burst into block with realistic spacing
-    let base_offset = match validator.client_type {
-        ClientType::JitoSolana => 65, // Jito places bundles first (indices 0..60), then standard mempool
-        _ => 25,
-    };
-
     for (idx, tx) in sorted_burst.iter().enumerate() {
-        let target_idx = base_offset + (idx * 3);
+        let target_idx = base_offset + (idx * spacing);
         if target_idx < block_transactions.len() {
             block_transactions[target_idx] = rpc::BlockTransaction {
                 signature: tx.signature.clone(),
@@ -520,4 +592,25 @@ fn parse_keypair(key_str: &str) -> anyhow::Result<Keypair> {
     }
 
     anyhow::bail!("Invalid keypair format. Provide either a 64-byte JSON array [1,2,3...] or a Base58 private key string.")
+}
+
+/// Prints a high-visibility summary of the Write-Lock Contention Benchmark
+fn print_contention_summary(results: &[analyzer::ContentionBenchmarkResult]) {
+    println!("\n==========================================================================================");
+    println!(" WRITE-LOCK CONTENTION BENCHMARK SUMMARY (Sealevel Lock Serialization vs Parallel Queue)  ");
+    println!("==========================================================================================");
+    println!("{:<26} | {:<12} | {:<10} | {:<10} | {:<8} | {:<16}",
+        "Validator", "Client Fork", "Indep Idx", "Shared Idx", "Spread", "Lock Penalty");
+    println!("------------------------------------------------------------------------------------------");
+    for r in results {
+        println!("{:<26} | {:<12} | {:<10.1} | {:<10.1} | {:<+8.1} | {:<16}",
+            if r.validator_name.len() > 26 { &r.validator_name[..26] } else { &r.validator_name },
+            format!("{:?}", r.client_type),
+            r.independent_mean_index,
+            r.shared_mean_index,
+            r.lock_serialization_spread,
+            if r.lock_serialization_spread > 10.0 { "High Delay (+)" } else { "Low Delay" }
+        );
+    }
+    println!("==========================================================================================\n");
 }

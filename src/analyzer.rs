@@ -47,6 +47,21 @@ pub struct BurstAnalysisResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentionBenchmarkResult {
+    pub validator_identity: String,
+    pub validator_name: String,
+    pub client_type: ClientType,
+    pub independent_burst_id: String,
+    pub shared_burst_id: String,
+    pub independent_spearman_fee: f64,
+    pub shared_spearman_fee: f64,
+    pub independent_mean_index: f64,
+    pub shared_mean_index: f64,
+    pub lock_serialization_spread: f64,
+    pub contention_delay_assessment: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatorAggregatedResult {
     pub validator_identity: String,
     pub validator_name: String,
@@ -380,6 +395,55 @@ impl Analyzer {
             burst_summaries: v_bursts,
         }
     }
+
+    /// Compares an independent-payer burst (zero lock contention) with a shared-payer burst (lock serialization)
+    pub fn compare_contention_pair(
+        validator: &TargetValidator,
+        indep: &BurstAnalysisResult,
+        shared: &BurstAnalysisResult,
+    ) -> ContentionBenchmarkResult {
+        let indep_mean = if !indep.txs.is_empty() {
+            indep.txs.iter().map(|t| t.index_in_block as f64).sum::<f64>() / indep.txs.len() as f64
+        } else {
+            0.0
+        };
+
+        let shared_mean = if !shared.txs.is_empty() {
+            shared.txs.iter().map(|t| t.index_in_block as f64).sum::<f64>() / shared.txs.len() as f64
+        } else {
+            0.0
+        };
+
+        let spread = shared_mean - indep_mean;
+
+        let assessment = if spread > 10.0 {
+            format!(
+                "Significant Sealevel write-lock serialization (+{:.1} avg block index shift). Shared fee-payer account forces sequential queuing.",
+                spread
+            )
+        } else if spread > 0.0 {
+            format!(
+                "Moderate lock contention (+{:.1} avg index shift). Worker channels partially absorb contention.",
+                spread
+            )
+        } else {
+            "Minimal lock contention observed (concurrent mempool background traffic dominated placement).".to_string()
+        };
+
+        ContentionBenchmarkResult {
+            validator_identity: validator.identity.clone(),
+            validator_name: validator.name.clone(),
+            client_type: validator.client_type,
+            independent_burst_id: indep.burst_id.clone(),
+            shared_burst_id: shared.burst_id.clone(),
+            independent_spearman_fee: indep.spearman_fee_correlation,
+            shared_spearman_fee: shared.spearman_fee_correlation,
+            independent_mean_index: indep_mean,
+            shared_mean_index: shared_mean,
+            lock_serialization_spread: spread,
+            contention_delay_assessment: assessment,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -467,5 +531,113 @@ mod tests {
 
         let tau = Analyzer::compute_kendall_tau(&txs);
         assert!((tau - (-1.0)).abs() < 1e-4, "Kendall tau should be -1.0, got {}", tau);
+    }
+
+    #[test]
+    fn test_contention_comparison() {
+        let val = TargetValidator {
+            identity: "testVal111111111111111111111111111111111111".to_string(),
+            name: "Test Validator".to_string(),
+            client_type: ClientType::Agave,
+            version_string: "4.4.0".to_string(),
+            stake_sol: 1_000_000.0,
+            tpu_ip: None,
+        };
+
+        let indep = BurstAnalysisResult {
+            burst_id: "test-indep".to_string(),
+            pattern: BurstPattern::AscendingFee,
+            target_validator_identity: val.identity.clone(),
+            validator_client_type: ClientType::Agave,
+            target_slot: 100,
+            landed_slot: 100,
+            slot_lag: 0,
+            total_tx_sent: 4,
+            total_tx_landed: 4,
+            landing_rate_pct: 100.0,
+            txs: vec![
+                TxLandingResult {
+                    signature: "s1".to_string(),
+                    sequence_index: 0,
+                    priority_fee_micro_lamports: 100,
+                    send_timestamp_ns: 100,
+                    landed_in_slot: 100,
+                    index_in_block: 20,
+                    total_transactions_in_block: 200,
+                    relative_block_percentile: 10.0,
+                    fee_paid_lamports: 5000,
+                    compute_units_consumed: Some(1000),
+                },
+                TxLandingResult {
+                    signature: "s2".to_string(),
+                    sequence_index: 1,
+                    priority_fee_micro_lamports: 1000,
+                    send_timestamp_ns: 200,
+                    landed_in_slot: 100,
+                    index_in_block: 25,
+                    total_transactions_in_block: 200,
+                    relative_block_percentile: 12.5,
+                    fee_paid_lamports: 5001,
+                    compute_units_consumed: Some(1000),
+                },
+            ],
+            spearman_fee_correlation: 0.8,
+            spearman_send_correlation: 0.8,
+            kendall_tau_fee: 0.8,
+            p_value_fee: 0.01,
+            p_value_send: 0.01,
+            burst_classification: "STRONG FEE-PRIORITY ORDERING".to_string(),
+        };
+
+        let shared = BurstAnalysisResult {
+            burst_id: "test-shared".to_string(),
+            pattern: BurstPattern::AscendingFee,
+            target_validator_identity: val.identity.clone(),
+            validator_client_type: ClientType::Agave,
+            target_slot: 100,
+            landed_slot: 100,
+            slot_lag: 0,
+            total_tx_sent: 4,
+            total_tx_landed: 4,
+            landing_rate_pct: 100.0,
+            txs: vec![
+                TxLandingResult {
+                    signature: "s3".to_string(),
+                    sequence_index: 0,
+                    priority_fee_micro_lamports: 100,
+                    send_timestamp_ns: 100,
+                    landed_in_slot: 100,
+                    index_in_block: 45,
+                    total_transactions_in_block: 200,
+                    relative_block_percentile: 22.5,
+                    fee_paid_lamports: 5000,
+                    compute_units_consumed: Some(1000),
+                },
+                TxLandingResult {
+                    signature: "s4".to_string(),
+                    sequence_index: 1,
+                    priority_fee_micro_lamports: 1000,
+                    send_timestamp_ns: 200,
+                    landed_in_slot: 100,
+                    index_in_block: 55,
+                    total_transactions_in_block: 200,
+                    relative_block_percentile: 27.5,
+                    fee_paid_lamports: 5001,
+                    compute_units_consumed: Some(1000),
+                },
+            ],
+            spearman_fee_correlation: 0.4,
+            spearman_send_correlation: 0.4,
+            kendall_tau_fee: 0.4,
+            p_value_fee: 0.05,
+            p_value_send: 0.05,
+            burst_classification: "WEAK FEE-PRIORITY ORDERING".to_string(),
+        };
+
+        let comp = Analyzer::compare_contention_pair(&val, &indep, &shared);
+        assert_eq!(comp.independent_mean_index, 22.5);
+        assert_eq!(comp.shared_mean_index, 50.0);
+        assert_eq!(comp.lock_serialization_spread, 27.5);
+        assert!(comp.contention_delay_assessment.contains("Significant Sealevel write-lock serialization"));
     }
 }
