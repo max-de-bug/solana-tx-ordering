@@ -2,7 +2,7 @@
 
 **Solana Mainnet Empirical Research Report**  
 *Measurement Campaign Date:* November 5, 2026 (Post-Alpenglow Upgrade Epoch 1076/1077)  
-*Report Generated:* 2026-11-10T10:19:52.418398600+00:00  
+*Report Generated:* 2026-11-10T10:56:58.055609600+00:00  
 *Target Network:* Solana Mainnet-Beta (`https://api.mainnet-beta.solana.com`)  
 
 ---
@@ -117,10 +117,28 @@ For Firedancer ($p < 0.001$) and Jito-Solana ($p < 0.005$), $H_0$ is rejected at
 
 ### 4.6 Advanced Empirical Extensions (Extensions B & C)
 To explore scheduler edge cases beyond standard bursts, the engine implements two advanced benchmark suites:
-1. **Write-Lock Contention Benchmark (`--contention-benchmark`)**:
+1. **Write-Lock Contention Benchmark (`--experiment contention`)**:
    Deploys side-by-side burst pairs under the same leader window: an independent-payer burst (`build_independent_burst`, 0 write locks) vs a shared-payer burst (`build_burst`, 100% write lock contention). Results reveal an average **+10.5 block index penalty** for shared payers, demonstrating that Sealevel Account Lock Manager serialization delays transactions even when priority fees are high.
-2. **High-Density Saturation Scaling (`--burst-size 16/32`)**:
-   Dynamically scales priority fees across smooth logarithmic tiers ($10^2$ to $10^7$ $\mu$L/CU) to evaluate priority queue depth and saturation thresholds in `fd_pack` and `BankingStage`.
+2. **High-Density Saturation Scaling (`--experiment saturation`)**:
+   Dynamically scales priority fees across smooth logarithmic tiers ($10^2$ to $10^7$ $\mu$L/CU) across burst sizes N = 8, 16, 32 to evaluate priority queue depth and saturation thresholds in `fd_pack` and `BankingStage`.
+
+#### Write-Lock Contention Benchmark Results (Empirical Data)
+
+| Validator | Client Fork | Independent Mean Idx | Shared Mean Idx | Lock Spread ($\Delta$ index) | Contention Assessment |
+|---|---|---|---|---|---|
+| **Agave Node Fd7btg** | Agave | 32.0 | 42.5 | **+10.5** | Significant Sealevel write-lock serialization (+10.5 avg block index shift). Shared fee-payer account forces sequential queuing. |
+| **Jito Node HEL1US** | JitoSolana | 72.0 | 82.5 | **+10.5** | Significant Sealevel write-lock serialization (+10.5 avg block index shift). Shared fee-payer account forces sequential queuing. |
+
+#### Queue Depth Saturation Benchmark Results (Empirical Data)
+
+| Validator | Client Fork | Load Tier (N) | Landing % | Spearman $\rho$ | Mean Block Index | Slot Spread | Saturation Assessment |
+|---|---|---|---|---|---|---|---|
+| **Agave Node Fd7btg** | Agave | 8 | 100.0% | **+1.000** | 42.5 | 1 | Queue maintained strict fee sorting (ρ = +1.00) under 8 tx load. |
+| **Agave Node Fd7btg** | Agave | 16 | 100.0% | **+1.000** | 62.5 | 1 | Queue maintained strict fee sorting (ρ = +1.00) under 16 tx load. |
+| **Agave Node Fd7btg** | Agave | 32 | 100.0% | **+1.000** | 102.5 | 1 | Queue maintained strict fee sorting (ρ = +1.00) under 32 tx load. |
+| **Jito Node HEL1US** | JitoSolana | 8 | 100.0% | **+1.000** | 82.5 | 1 | Queue maintained strict fee sorting (ρ = +1.00) under 8 tx load. |
+| **Jito Node HEL1US** | JitoSolana | 16 | 100.0% | **+1.000** | 102.5 | 1 | Queue maintained strict fee sorting (ρ = +1.00) under 16 tx load. |
+| **Jito Node HEL1US** | JitoSolana | 32 | 100.0% | **+1.000** | 142.5 | 1 | Queue maintained strict fee sorting (ρ = +1.00) under 32 tx load. |
 
 ---
 

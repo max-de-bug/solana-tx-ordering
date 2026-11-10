@@ -34,7 +34,67 @@ services:
     profiles:
       - analyze
 
-  # 3. Live Sending Service (EXPLICIT OPT-IN ONLY - Requires funded keypair in ./keys/id.json)
+  # 3. Write-Lock Contention Benchmark (Shared Payer vs Independent Payers)
+  contention-experiment:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: solana-validator-contention
+    ports:
+      - "1998:1995"
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+      - ./keys:/keys:ro
+    environment:
+      - SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
+      - SPEND_CAP_SOL=${SPEND_CAP_SOL:-0.05}
+      - PORT=1995
+    command: ["--dry-run", "--experiment", "contention", "--serve-dashboard", "--port", "1995"]
+    profiles:
+      - contention
+
+  # 4. Queue Saturation Benchmark (Load scaling N = 8, 16, 32)
+  saturation-experiment:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: solana-validator-saturation
+    ports:
+      - "1999:1995"
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+      - ./keys:/keys:ro
+    environment:
+      - SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
+      - SPEND_CAP_SOL=${SPEND_CAP_SOL:-0.05}
+      - PORT=1995
+    command: ["--dry-run", "--experiment", "saturation", "--serve-dashboard", "--port", "1995"]
+    profiles:
+      - saturation
+
+  # 5. Full Experiment Suite (Runs Ordering + Contention + Saturation)
+  all-experiments:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: solana-validator-all
+    ports:
+      - "2000:1995"
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+      - ./keys:/keys:ro
+    environment:
+      - SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
+      - SPEND_CAP_SOL=${SPEND_CAP_SOL:-0.05}
+      - PORT=1995
+    command: ["--dry-run", "--experiment", "all", "--serve-dashboard", "--port", "1995"]
+    profiles:
+      - all
+
+  # 6. Live Sending Service (EXPLICIT OPT-IN ONLY - Requires funded keypair in ./keys/id.json)
   live-experiment:
     build:
       context: .

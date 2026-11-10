@@ -2,13 +2,12 @@ use clap::Parser;
 use solana_sdk::signature::{Keypair, Signer};
 use std::fs;
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
 use tracing::{info, warn};
 
 mod analyzer;
 mod config;
+mod experiments;
 mod leader_schedule;
 mod report;
 mod rpc;
@@ -18,13 +17,13 @@ mod tx_crafting;
 mod validator_info;
 
 use analyzer::{Analyzer, BurstAnalysisResult, ValidatorAggregatedResult};
-use config::Config;
+use config::{Config, ExperimentType};
+use experiments::ExperimentEngine;
 use leader_schedule::LeaderScheduleManager;
 use report::ReportGenerator;
 use rpc::RpcClient;
 use server::DashboardServer;
 use spend_tracker::SpendTracker;
-use tx_crafting::{BurstPattern, CraftedTxMetadata, TxCrafter};
 use validator_info::{discover_cluster_validators, ClientType, TargetValidator};
 
 const WIN95_BANNER: &str = r#"
@@ -127,217 +126,137 @@ async fn main() -> anyhow::Result<()> {
     let current_slot = rpc.get_slot().await.unwrap_or(465_042_000);
     info!("Current cluster slot: {}", current_slot);
 
-    // 3. Execute measurement bursts across target validators
+    // 3. Execute requested experiment suite across target validators
     let mut all_burst_results: Vec<BurstAnalysisResult> = Vec::new();
+    let mut aggregated_results: Vec<ValidatorAggregatedResult> = Vec::new();
 
-    if config.contention_benchmark {
-        info!("============================================================");
-        info!("RUNNING WRITE-LOCK CONTENTION BENCHMARK: SHARED VS INDEPENDENT PAYERS");
-        info!("============================================================");
-        let mut contention_results = Vec::new();
+    let effective_exp = config.effective_experiment();
+    info!("Running Experiment Suite: {:?}", effective_exp);
 
-        for (v_idx, validator) in validators.iter().enumerate() {
-            let current_slot = rpc.get_slot().await.unwrap_or(current_slot);
-            info!(
-                "Contention Test on Validator {}/{}: {} ({})",
-                v_idx + 1,
-                validators.len(),
-                validator.name,
-                validator.client_type
-            );
-
-            let upcoming_windows = schedule_mgr.find_upcoming_windows(&validator.identity, current_slot, 2);
-            let window_indep = upcoming_windows.first().cloned().unwrap_or_else(|| {
-                leader_schedule::LeaderWindow {
-                    validator_identity: validator.identity.clone(),
-                    start_slot: current_slot + 20 + (v_idx as u64 * 30),
-                    end_slot: current_slot + 23 + (v_idx as u64 * 30),
-                    window_length: 4,
-                    estimated_start_time_ms: 1000,
-                }
-            });
-
-            let recent_bh = match rpc.get_latest_blockhash().await {
-                Ok(bh) => solana_sdk::hash::Hash::from_str(&bh.blockhash).unwrap_or_default(),
-                Err(_) => solana_sdk::hash::Hash::default(),
-            };
-
-            let burst_id_prefix = format!("{}-{}", &validator.identity[..6.min(validator.identity.len())], window_indep.start_slot);
-            let (indep_txs, shared_txs) = TxCrafter::build_contention_pair(
+    match effective_exp {
+        ExperimentType::Ordering => {
+            let (agg, bursts) = ExperimentEngine::run_ordering_experiment(
+                &config,
+                &rpc,
+                &schedule_mgr,
+                &validators,
                 &payer,
-                recent_bh,
-                &burst_id_prefix,
-                config.burst_size,
-                BurstPattern::AscendingFee,
-            );
-
-            schedule_mgr.wait_for_window(&rpc, &window_indep, !is_live).await?;
-
-            // 1. Process Independent burst (zero lock contention)
-            let block_indep = fetch_or_simulate_block(&rpc, window_indep.start_slot, &indep_txs, validator, BurstPattern::AscendingFee, is_live).await?;
-            let indep_analysis = Analyzer::match_burst_in_block(&indep_txs, &block_indep, validator, window_indep.start_slot);
-
-            // 2. Process Shared burst (Sealevel write-lock contention)
-            let block_shared = fetch_or_simulate_block(&rpc, window_indep.start_slot, &shared_txs, validator, BurstPattern::AscendingFee, is_live).await?;
-            let shared_analysis = Analyzer::match_burst_in_block(&shared_txs, &block_shared, validator, window_indep.start_slot);
-
-            let comp = Analyzer::compare_contention_pair(validator, &indep_analysis, &shared_analysis);
-            info!(
-                "Contention Result [{}]: Indep Mean Idx: {:.1} vs Shared Mean Idx: {:.1} (Spread: {:+.1}) | {}",
-                validator.name,
-                comp.independent_mean_index,
-                comp.shared_mean_index,
-                comp.lock_serialization_spread,
-                comp.contention_delay_assessment
-            );
-
-            all_burst_results.push(indep_analysis);
-            all_burst_results.push(shared_analysis);
-            contention_results.push(comp);
+                &spend_tracker,
+                is_live,
+            ).await?;
+            aggregated_results = agg;
+            all_burst_results = bursts;
         }
+        ExperimentType::Contention => {
+            let (contention_results, bursts) = ExperimentEngine::run_contention_experiment(
+                &config,
+                &rpc,
+                &schedule_mgr,
+                &validators,
+                &payer,
+                &spend_tracker,
+                is_live,
+            ).await?;
+            let contention_path = config.data_dir.join("contention_benchmark.json");
+            fs::write(&contention_path, serde_json::to_string_pretty(&contention_results)?)?;
+            info!("Contention benchmark data saved to {:?}", contention_path);
 
-        print_contention_summary(&contention_results);
-    } else {
-        let patterns = vec![
-            BurstPattern::AscendingFee,
-            BurstPattern::DescendingFee,
-            BurstPattern::AlternatingFee,
-            BurstPattern::UniformFee,
-        ];
-
-        for (v_idx, validator) in validators.iter().enumerate() {
-            let current_slot = rpc.get_slot().await.unwrap_or(current_slot);
-            info!("============================================================");
-            info!(
-                "Analyzing Validator {}/{}: {} ({}) [cluster slot: {}]",
-                v_idx + 1,
-                validators.len(),
-                validator.name,
-                validator.client_type,
-                current_slot
-            );
-
-            // Find upcoming leader windows (one dedicated 4-slot window per pattern)
-            let upcoming_windows = schedule_mgr.find_upcoming_windows(&validator.identity, current_slot, patterns.len());
-
-            // Test multiple patterns for each validator to isolate FIFO vs Priority Fee
-            for (p_idx, &pattern) in patterns.iter().enumerate() {
-                let window = match upcoming_windows.get(p_idx) {
-                    Some(w) => w.clone(),
-                    None => {
-                        warn!("No distinct upcoming window found for {} pattern {}; synthesizing window.", validator.name, p_idx);
-                        leader_schedule::LeaderWindow {
-                            validator_identity: validator.identity.clone(),
-                            start_slot: current_slot + 20 + (v_idx as u64 * 30) + (p_idx as u64 * 5),
-                            end_slot: current_slot + 23 + (v_idx as u64 * 30) + (p_idx as u64 * 5),
-                            window_length: 4,
-                            estimated_start_time_ms: 1000,
-                        }
-                    }
-                };
-
-                // Synchronize with target leader window
-                schedule_mgr.wait_for_window(&rpc, &window, !is_live).await?;
-
-                let burst_id = format!("{}-{}-p{}", &validator.identity[..6.min(validator.identity.len())], window.start_slot, p_idx);
-                info!("Deploying burst {} with pattern {:?}", burst_id, pattern);
-
-                // Fetch recent blockhash
-                let recent_bh = match rpc.get_latest_blockhash().await {
-                    Ok(bh) => solana_sdk::hash::Hash::from_str(&bh.blockhash).unwrap_or_default(),
-                    Err(_) => solana_sdk::hash::Hash::default(),
-                };
-
-                // Build burst transactions
-                let burst_txs = TxCrafter::build_burst(
-                    &payer,
-                    recent_bh,
-                    &burst_id,
-                    config.burst_size,
-                    pattern,
-                );
-
-                // In live mode, send transactions subject to spend cap
-                if is_live {
-                    let total_burst_fee: u64 = burst_txs.iter().map(|t| t.estimated_fee_lamports).sum();
-                    if let Err(e) = spend_tracker.pre_check_spend(total_burst_fee) {
-                        warn!("Spend cap guard prevented burst: {}", e);
-                        continue;
-                    }
-
-                    let payloads: Vec<String> = burst_txs.iter().map(|t| t.base64_payload.clone()).collect();
-                    match rpc.send_transaction_batch(&payloads).await {
-                        Ok(sigs) => {
-                            info!("Broadcast burst of {} transactions via JSON-RPC batch ({} signatures received)", payloads.len(), sigs.len());
-                            for (tx, sig) in burst_txs.iter().zip(sigs.iter()) {
-                                info!("Broadcast tx: {}", sig);
-                                spend_tracker.increment_sent();
-                                spend_tracker.record_spend(tx.estimated_fee_lamports);
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Batch broadcast failed ({}), falling back to sequential dispatch...", e);
-                            for tx in &burst_txs {
-                                if let Ok(sig) = rpc.send_transaction(&tx.base64_payload).await {
-                                    info!("Broadcast tx (fallback): {}", sig);
-                                    spend_tracker.increment_sent();
-                                    spend_tracker.record_spend(tx.estimated_fee_lamports);
-                                }
-                                tokio::time::sleep(Duration::from_millis(5)).await;
-                            }
-                        }
-                    }
-
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                }
-
-                // Fetch landing block and analyze order
-                let block = fetch_or_simulate_block(&rpc, window.start_slot, &burst_txs, validator, pattern, is_live).await?;
-
-                let burst_analysis = Analyzer::match_burst_in_block(&burst_txs, &block, validator, window.start_slot);
-                info!(
-                    "Burst Results: Landed {}/{} txs ({:.1}%) | Spearman Fee ρ: {:+.3} (p={:.3}) | Rule: {}",
-                    burst_analysis.total_tx_landed,
-                    burst_analysis.total_tx_sent,
-                    burst_analysis.landing_rate_pct,
-                    burst_analysis.spearman_fee_correlation,
-                    burst_analysis.p_value_fee,
-                    burst_analysis.burst_classification
-                );
-
-                all_burst_results.push(burst_analysis);
+            for validator in &validators {
+                aggregated_results.push(Analyzer::aggregate_validator(validator, &bursts));
             }
+            all_burst_results = bursts;
+        }
+        ExperimentType::Saturation => {
+            let (sat_results, bursts) = ExperimentEngine::run_saturation_experiment(
+                &config,
+                &rpc,
+                &schedule_mgr,
+                &validators,
+                &payer,
+                &spend_tracker,
+                is_live,
+            ).await?;
+            let sat_path = config.data_dir.join("saturation_benchmark.json");
+            fs::write(&sat_path, serde_json::to_string_pretty(&sat_results)?)?;
+            info!("Saturation benchmark data saved to {:?}", sat_path);
+
+            for validator in &validators {
+                aggregated_results.push(Analyzer::aggregate_validator(validator, &bursts));
+            }
+            all_burst_results = bursts;
+        }
+        ExperimentType::All => {
+            info!("Executing ALL experiment suites sequentially: Ordering -> Contention -> Saturation");
+            let (agg, ord_bursts) = ExperimentEngine::run_ordering_experiment(
+                &config,
+                &rpc,
+                &schedule_mgr,
+                &validators,
+                &payer,
+                &spend_tracker,
+                is_live,
+            ).await?;
+            aggregated_results = agg;
+            all_burst_results.extend(ord_bursts);
+
+            let (contention_results, cont_bursts) = ExperimentEngine::run_contention_experiment(
+                &config,
+                &rpc,
+                &schedule_mgr,
+                &validators,
+                &payer,
+                &spend_tracker,
+                is_live,
+            ).await?;
+            let contention_path = config.data_dir.join("contention_benchmark.json");
+            fs::write(&contention_path, serde_json::to_string_pretty(&contention_results)?)?;
+            all_burst_results.extend(cont_bursts);
+
+            let (sat_results, sat_bursts) = ExperimentEngine::run_saturation_experiment(
+                &config,
+                &rpc,
+                &schedule_mgr,
+                &validators,
+                &payer,
+                &spend_tracker,
+                is_live,
+            ).await?;
+            let sat_path = config.data_dir.join("saturation_benchmark.json");
+            fs::write(&sat_path, serde_json::to_string_pretty(&sat_results)?)?;
+            all_burst_results.extend(sat_bursts);
         }
     }
 
-    // 4. Aggregate results per validator
-    let mut aggregated_results = Vec::new();
-    for validator in &validators {
-        let agg = Analyzer::aggregate_validator(validator, &all_burst_results);
-        aggregated_results.push(agg);
-    }
-
-    // 5. Save raw JSON data
+    // 4. Save raw JSON data
     let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
     let raw_data_path = config.data_dir.join(format!("measurements_{}.json", timestamp));
     let analysis_path = config.data_dir.join(format!("analysis_{}.json", timestamp));
 
     fs::write(&raw_data_path, serde_json::to_string_pretty(&all_burst_results)?)?;
     fs::write(&analysis_path, serde_json::to_string_pretty(&aggregated_results)?)?;
-    // Also save standard measurements.json for easy analyze-only access
+
+    // In live mode or if canonical files don't exist yet, save as default measurements.json
     let default_raw = config.data_dir.join("measurements.json");
-    fs::write(&default_raw, serde_json::to_string_pretty(&all_burst_results)?)?;
+    let default_analysis = config.data_dir.join("analysis.json");
+    if is_live || !default_raw.exists() {
+        fs::write(&default_raw, serde_json::to_string_pretty(&all_burst_results)?)?;
+        fs::write(&default_analysis, serde_json::to_string_pretty(&aggregated_results)?)?;
+    } else {
+        let sim_raw = config.data_dir.join("measurements_simulated.json");
+        fs::write(&sim_raw, serde_json::to_string_pretty(&all_burst_results)?)?;
+        info!("Dry-run data saved to {:?} (canonical measurements.json preserved)", sim_raw);
+    }
 
     info!("Raw measurement data saved to {:?}", raw_data_path);
     info!("Aggregated analysis data saved to {:?}", analysis_path);
 
-    // 6. Generate Markdown report and Windows 95 HTML Dashboard
+    // 5. Generate Markdown report and Windows 95 HTML Dashboard
     ReportGenerator::generate_all(&config, &aggregated_results, &all_burst_results, &spend_tracker)?;
 
-    // 7. Print CLI summary
+    // 6. Print CLI summary
     print_cli_summary(&aggregated_results, &spend_tracker);
 
-    // 8. Serve dashboard if requested
+    // 7. Serve dashboard if requested
     if config.serve_dashboard {
         let html_path = config.reports_dir.join("dashboard.html");
         DashboardServer::run(config.port, &html_path).await?;
@@ -400,132 +319,7 @@ fn load_existing_data(
     anyhow::bail!("No measurements.json found in {:?}", data_dir)
 }
 
-/// Helper to fetch real block or simulate landing coordinates for dry-run
-async fn fetch_or_simulate_block(
-    rpc: &RpcClient,
-    slot: u64,
-    burst_txs: &[CraftedTxMetadata],
-    validator: &TargetValidator,
-    _pattern: BurstPattern,
-    is_live: bool,
-) -> anyhow::Result<rpc::DetailedBlock> {
-    // In live mode, detect actual landing slot and fetch confirmed Mainnet block
-    if is_live {
-        info!("Awaiting transaction confirmation across leader window (target slot: {})...", slot);
-        let mut detected_slot = None;
 
-        for attempt in 1..=8 {
-            tokio::time::sleep(Duration::from_millis(1000)).await;
-            for tx in burst_txs {
-                if let Ok(Some(s)) = rpc.get_signature_status(&tx.signature).await {
-                    info!("Transaction {} confirmed in slot {} (attempt {})", &tx.signature[..12], s, attempt);
-                    detected_slot = Some(s);
-                    break;
-                }
-            }
-            if detected_slot.is_some() {
-                break;
-            }
-        }
-
-        let query_slot = detected_slot.unwrap_or(slot);
-        info!("Querying confirmed Mainnet block for slot {}...", query_slot);
-
-        for attempt in 1..=5 {
-            match rpc.get_block(query_slot).await {
-                Ok(block) => {
-                    info!(
-                        "Successfully fetched real Mainnet block {} with {} confirmed transactions!",
-                        query_slot, block.total_transactions
-                    );
-                    return Ok(block);
-                }
-                Err(e) => {
-                    warn!("Block {} not ready yet (attempt {}): {}. Retrying in 1.5s...", query_slot, attempt, e);
-                    tokio::time::sleep(Duration::from_millis(1500)).await;
-                }
-            }
-        }
-    }
-
-    // In dry-run mode, synthesize realistic block order adhering to the validator client's documented architecture
-    let is_independent = burst_txs.first().map(|t| t.memo_payload.contains("independent=true")).unwrap_or(false);
-    let base_offset = match validator.client_type {
-        ClientType::JitoSolana => 65, // Jito places bundles first (indices 0..60), then standard mempool
-        _ => 25,
-    };
-    // Shared fee-payer causes write-lock serialization delay in Sealevel Account Lock Manager
-    let spacing = if is_independent { 2 } else { 5 };
-    let total_block_txs = 600.max(base_offset + burst_txs.len() * (spacing + 2));
-
-    let mut block_transactions = Vec::with_capacity(total_block_txs);
-
-    // Background transactions in block
-    for i in 0..total_block_txs {
-        block_transactions.push(rpc::BlockTransaction {
-            signature: format!("simBgTx{:04}...", i),
-            index_in_block: i,
-            fee: 5000,
-            compute_units_consumed: Some(450),
-            err: None,
-            memo: None,
-            priority_fee_micro_lamports: None,
-        });
-    }
-
-    // Embed burst transactions according to client scheduler rule
-    let mut sorted_burst = burst_txs.to_vec();
-
-    match validator.client_type {
-        ClientType::Firedancer => {
-            // Firedancer fd_pack strictly sorts by priority fee descending with sub-microsecond precision
-            sorted_burst.sort_by(|a, b| b.priority_fee_micro_lamports.cmp(&a.priority_fee_micro_lamports));
-        }
-        ClientType::JitoSolana => {
-            // Jito sorts standard mempool transactions by priority fee descending
-            sorted_burst.sort_by(|a, b| b.priority_fee_micro_lamports.cmp(&a.priority_fee_micro_lamports));
-        }
-        ClientType::Agave => {
-            // Agave BankingStage worker threads interleave non-conflicting accounts
-            sorted_burst.sort_by(|a, b| b.priority_fee_micro_lamports.cmp(&a.priority_fee_micro_lamports));
-            if sorted_burst.len() > 3 && is_independent {
-                sorted_burst.swap(1, 2);
-            }
-        }
-        ClientType::AgaveBam => {
-            // BAM optimizes for maximum fee density
-            sorted_burst.sort_by(|a, b| b.priority_fee_micro_lamports.cmp(&a.priority_fee_micro_lamports));
-        }
-        _ => {}
-    }
-
-    // If pattern was DescendingFee, this ordering demonstrates fee over FIFO!
-    // Insert sorted burst into block with realistic spacing
-    for (idx, tx) in sorted_burst.iter().enumerate() {
-        let target_idx = base_offset + (idx * spacing);
-        if target_idx < block_transactions.len() {
-            block_transactions[target_idx] = rpc::BlockTransaction {
-                signature: tx.signature.clone(),
-                index_in_block: target_idx,
-                fee: tx.estimated_fee_lamports,
-                compute_units_consumed: Some(tx.compute_unit_limit as u64),
-                err: None,
-                memo: Some(tx.memo_payload.clone()),
-                priority_fee_micro_lamports: Some(tx.priority_fee_micro_lamports),
-            };
-        }
-    }
-
-    Ok(rpc::DetailedBlock {
-        slot,
-        blockhash: "4uQeVj5tqViQh7yWWGStvkEG1Zmhx6uasJtWCJziofM".to_string(),
-        previous_blockhash: "3kQeVj5tqViQh7yWWGStvkEG1Zmhx6uasJtWCJziofM".to_string(),
-        parent_slot: slot - 1,
-        block_time: Some(chrono::Utc::now().timestamp()),
-        total_transactions: block_transactions.len(),
-        transactions: block_transactions,
-    })
-}
 
 fn print_cli_summary(results: &[ValidatorAggregatedResult], tracker: &SpendTracker) {
     println!("\n==========================================================================================");
@@ -592,25 +386,4 @@ fn parse_keypair(key_str: &str) -> anyhow::Result<Keypair> {
     }
 
     anyhow::bail!("Invalid keypair format. Provide either a 64-byte JSON array [1,2,3...] or a Base58 private key string.")
-}
-
-/// Prints a high-visibility summary of the Write-Lock Contention Benchmark
-fn print_contention_summary(results: &[analyzer::ContentionBenchmarkResult]) {
-    println!("\n==========================================================================================");
-    println!(" WRITE-LOCK CONTENTION BENCHMARK SUMMARY (Sealevel Lock Serialization vs Parallel Queue)  ");
-    println!("==========================================================================================");
-    println!("{:<26} | {:<12} | {:<10} | {:<10} | {:<8} | {:<16}",
-        "Validator", "Client Fork", "Indep Idx", "Shared Idx", "Spread", "Lock Penalty");
-    println!("------------------------------------------------------------------------------------------");
-    for r in results {
-        println!("{:<26} | {:<12} | {:<10.1} | {:<10.1} | {:<+8.1} | {:<16}",
-            if r.validator_name.len() > 26 { &r.validator_name[..26] } else { &r.validator_name },
-            format!("{:?}", r.client_type),
-            r.independent_mean_index,
-            r.shared_mean_index,
-            r.lock_serialization_spread,
-            if r.lock_serialization_spread > 10.0 { "High Delay (+)" } else { "Low Delay" }
-        );
-    }
-    println!("==========================================================================================\n");
 }

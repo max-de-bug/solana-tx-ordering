@@ -150,39 +150,57 @@ The experiment enforces a strict budget limit of 0.05 SOL:
 
 ### 1. Docker Compose (One-Command Reproducibility)
 
-Run the full pipeline and local dashboard with one command:
+Run the experiment suites and local dashboard with one command:
 
 ```bash
+# Standard Ordering suite (default dry-run, port 1995)
 docker compose up
+
+# Write-Lock Contention Benchmark (Shared vs Independent Payers)
+docker compose --profile contention up
+
+# Queue Saturation Benchmark (Burst loads N=8, 16, 32)
+docker compose --profile saturation up
+
+# Full Multi-Experiment Suite (Ordering + Contention + Saturation)
+docker compose --profile all up
+
+# Instant Analysis Mode (re-evaluates raw Mainnet logs without network calls)
+docker compose --profile analyze up
 ```
 
-Open `http://localhost:1995` in any browser to view the Windows 95 style interactive dashboard.
+Open `http://localhost:1995` in any browser to view the Windows 95 style interactive multi-tab dashboard.
 
 ### 2. Native Rust / Cargo Execution
 
-#### Dry-run mode (default, zero SOL spent):
+#### Standard Ordering Experiment (Default, 4 Fee Topologies):
 ```bash
-cargo run -- --dry-run --serve-dashboard --port 1995
+cargo run -- --dry-run --experiment ordering --serve-dashboard --port 1995
 ```
 
-#### Analyze-only mode (evaluates confirmed Mainnet data without network calls):
+#### Write-Lock Contention Benchmark (Shared Fee-Payer vs Independent Signers):
+```bash
+cargo run -- --dry-run --experiment contention --max-validators 4
+```
+
+#### Queue Saturation Benchmark (Scaling Load Tiers N = 8, 16, 32):
+```bash
+cargo run -- --dry-run --experiment saturation --max-validators 4
+```
+
+#### Full Multi-Experiment Suite (Runs Ordering -> Contention -> Saturation):
+```bash
+cargo run -- --dry-run --experiment all --serve-dashboard --port 1995
+```
+
+#### Analyze-Only Mode (Instantly evaluates confirmed Mainnet data without network queries):
 ```bash
 cargo run -- --analyze-only --serve-dashboard --port 1995
 ```
 
-#### Live sending (requires explicit flag, funded keypair, and spend cap):
+#### Live Sending (EXPLICIT OPT-IN ONLY - Requires funded keypair and spend cap):
 ```bash
 cargo run -- --live --keypair-path ./keys/id.json --spend-cap-sol 0.05 --serve-dashboard
-```
-
-#### Write-Lock Contention Benchmark (Extension B: Shared vs Independent Payers):
-```bash
-cargo run -- --dry-run --contention-benchmark --max-validators 4
-```
-
-#### High-Density Saturation Burst (Extension C: N=16 or N=32 txs):
-```bash
-cargo run -- --dry-run --burst-size 16 --max-validators 4
 ```
 
 ### 3. Live Dashboard URL & Offline Viewing
@@ -197,8 +215,8 @@ cargo run -- --dry-run --burst-size 16 --max-validators 4
 The research suite includes four enterprise extensions designed to stress-test scheduler edge cases:
 
 1. **Extension A: 1,000 CU Execution Budget**: Sets `cu_limit = 1,000` to guarantee SPL Memo instruction completion on-chain (`Status: Success`) while maintaining microscopic priority fee spend (< 0.000006 SOL/tx).
-2. **Extension B: Dedicated Write-Lock Contention Benchmark (`--contention-benchmark`)**: Concurrently evaluates independent fee-payers (`build_independent_burst`, zero lock contention) against shared fee-payers (`build_burst`, Sealevel Account Lock Manager serialization), quantifying the exact block index latency shift introduced by account write locks.
-3. **Extension C: High-Density Saturation Scaling (`--burst-size 16/32`)**: Dynamically scales priority fee tiers along a smooth logarithmic curve ($10^2$ to $10^7$ $\mu$L/CU) to stress-test priority queue depth in Firedancer's `fd_pack` and Agave's `BankingStage`.
+2. **Extension B: Dedicated Write-Lock Contention Benchmark (`--experiment contention`)**: Concurrently evaluates independent fee-payers (`build_independent_burst`, zero lock contention) against shared fee-payers (`build_burst`, Sealevel Account Lock Manager serialization), quantifying the exact block index latency shift introduced by account write locks.
+3. **Extension C: High-Density Saturation Scaling (`--experiment saturation`)**: Dynamically scales priority fee tiers along a smooth logarithmic curve ($10^2$ to $10^7$ $\mu$L/CU) across load tiers N = 8, 16, 32 to stress-test priority queue depth in Firedancer's `fd_pack` and Agave's `BankingStage`.
 4. **Extension D: Expanded 14-Validator Cluster Coverage (`--max-validators 14`)**: Features 14 verified high-stake validators spanning all four major client software families (`Agave`, `Jito-Solana`, `Firedancer`, `Agave-BAM`).
 
 ---

@@ -1,6 +1,30 @@
 use clap::Parser;
 use std::path::PathBuf;
 
+/// Supported experiment suite modes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
+pub enum ExperimentType {
+    /// Standard Ordering: 4 fee perturbation topologies (Ascending, Descending, Alternating, Uniform)
+    Ordering,
+    /// Write-Lock Contention: Evaluates Sealevel lock serialization (shared payer vs independent payers)
+    Contention,
+    /// Queue Saturation: Evaluates scheduler queue depth across varying burst densities (N=8, 16, 32)
+    Saturation,
+    /// Comprehensive Research Suite: Runs all experiment suites sequentially
+    All,
+}
+
+impl std::fmt::Display for ExperimentType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExperimentType::Ordering => write!(f, "ordering"),
+            ExperimentType::Contention => write!(f, "contention"),
+            ExperimentType::Saturation => write!(f, "saturation"),
+            ExperimentType::All => write!(f, "all"),
+        }
+    }
+}
+
 /// Solana Validator Transaction Ordering Experiment Engine (Windows 95 Style)
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -10,6 +34,10 @@ use std::path::PathBuf;
     about = "Measures how Solana validators order transactions within blocks across client forks"
 )]
 pub struct Config {
+    /// Specific experiment suite to execute: ordering (default), contention, saturation, or all
+    #[arg(long, value_enum, default_value_t = ExperimentType::Ordering, env = "EXPERIMENT_TYPE")]
+    pub experiment: ExperimentType,
+
     /// Solana JSON-RPC endpoint URL (defaults to mainnet-beta public RPC)
     #[arg(
         long,
@@ -103,6 +131,15 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// Resolves the effective experiment type, preserving backwards compatibility with --contention-benchmark
+    pub fn effective_experiment(&self) -> ExperimentType {
+        if self.contention_benchmark {
+            ExperimentType::Contention
+        } else {
+            self.experiment
+        }
     }
 
     /// Convert spend cap in SOL to lamports

@@ -1,0 +1,28 @@
+[
+  {
+    "validator_identity": "Fd7btgySsrjuo25CJCj7oE7VPMyezDhnx7pZkj2v69Nk",
+    "validator_name": "Agave Node Fd7btg",
+    "client_type": "Agave",
+    "independent_burst_id": "Fd7btg-467692748-indep",
+    "shared_burst_id": "Fd7btg-467692748-shared",
+    "independent_spearman_fee": 0.9761904761904762,
+    "shared_spearman_fee": 1.0,
+    "independent_mean_index": 32.0,
+    "shared_mean_index": 42.5,
+    "lock_serialization_spread": 10.5,
+    "contention_delay_assessment": "Significant Sealevel write-lock serialization (+10.5 avg block index shift). Shared fee-payer account forces sequential queuing."
+  },
+  {
+    "validator_identity": "HEL1USMZKAL2odpNBj2oCjffnFGaYwmbGmyewGv1e2TU",
+    "validator_name": "Jito Node HEL1US",
+    "client_type": "JitoSolana",
+    "independent_burst_id": "HEL1US-467692718-indep",
+    "shared_burst_id": "HEL1US-467692718-shared",
+    "independent_spearman_fee": 1.0,
+    "shared_spearman_fee": 1.0,
+    "independent_mean_index": 72.0,
+    "shared_mean_index": 82.5,
+    "lock_serialization_spread": 10.5,
+    "contention_delay_assessment": "Significant Sealevel write-lock serialization (+10.5 avg block index shift). Shared fee-payer account forces sequential queuing."
+  }
+]
