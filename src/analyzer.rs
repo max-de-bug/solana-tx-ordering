@@ -295,16 +295,14 @@ impl Analyzer {
             } else {
                 "MIXED (Weak Fee & Arrival Influence)".to_string()
             }
+        } else if spearman_fee > 0.80 && p_val < 0.05 {
+            "STRONG FEE-PRIORITY ORDERING".to_string()
+        } else if spearman_fee > 0.40 {
+            "WEAK FEE-PRIORITY ORDERING".to_string()
+        } else if spearman_fee.abs() < 0.30 {
+            "NO CORRELATION (Random Interleaving / Noise)".to_string()
         } else {
-            if spearman_fee > 0.80 && p_val < 0.05 {
-                "STRONG FEE-PRIORITY ORDERING".to_string()
-            } else if spearman_fee > 0.40 {
-                "WEAK FEE-PRIORITY ORDERING".to_string()
-            } else if spearman_fee.abs() < 0.30 {
-                "NO CORRELATION (Random Interleaving / Noise)".to_string()
-            } else {
-                "MIXED DYNAMICS".to_string()
-            }
+            "MIXED DYNAMICS".to_string()
         }
     }
 

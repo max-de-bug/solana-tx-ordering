@@ -41,7 +41,7 @@ impl ExperimentEngine {
         spend_tracker: &SpendTracker,
         is_live: bool,
     ) -> anyhow::Result<(Vec<ValidatorAggregatedResult>, Vec<BurstAnalysisResult>)> {
-        let patterns = vec![
+        let patterns = [
             BurstPattern::AscendingFee,
             BurstPattern::DescendingFee,
             BurstPattern::AlternatingFee,
@@ -218,7 +218,7 @@ impl ExperimentEngine {
         info!("RUNNING QUEUE SATURATION BENCHMARK: BURST SIZES N = 8, 16, 32");
         info!("============================================================");
 
-        let density_tiers = vec![8, 16, 32];
+        let density_tiers = [8, 16, 32];
         let mut saturation_results = Vec::new();
         let mut all_bursts = Vec::new();
         let current_slot = rpc.get_slot().await.unwrap_or(465_042_000);

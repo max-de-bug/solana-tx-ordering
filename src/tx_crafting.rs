@@ -13,6 +13,7 @@ use std::str::FromStr;
 pub const MEMO_PROGRAM_ID: &str = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::enum_variant_names)]
 pub enum BurstPattern {
     /// Ascending priority fees (tx 0 has lowest fee, tx N has highest fee)
     AscendingFee,
@@ -110,8 +111,7 @@ impl TxCrafter {
         let mut burst = Vec::with_capacity(burst_size);
         let fee_tiers = Self::generate_fee_tiers(burst_size, pattern);
 
-        for i in 0..burst_size {
-            let priority_fee = fee_tiers[i];
+        for (i, &priority_fee) in fee_tiers.iter().enumerate().take(burst_size) {
             // 1,000 CUs provides sufficient budget for SPL Memo (~800 CUs) while keeping lamport spend negligible
             let cu_limit: u32 = 1_000;
 

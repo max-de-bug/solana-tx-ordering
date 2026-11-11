@@ -95,7 +95,7 @@ impl ReportGenerator {
 
         md.push_str("# Empirical Investigation of Solana Validator Transaction Ordering Rules\n\n");
         md.push_str("**Solana Mainnet Empirical Research Report**  \n");
-        md.push_str(&format!("*Measurement Campaign Date:* November 5, 2026 (Post-Alpenglow Upgrade Epoch 1076/1077)  \n"));
+        md.push_str("*Measurement Campaign Date:* November 5, 2026 (Post-Alpenglow Upgrade Epoch 1076/1077)  \n");
         md.push_str(&format!("*Report Generated:* {}  \n", now_str));
         md.push_str(&format!("*Target Network:* Solana Mainnet-Beta (`{}`)  \n\n", config.rpc_url));
 
@@ -239,7 +239,7 @@ impl ReportGenerator {
                     c.validator_name, c.client_type, c.independent_mean_index, c.shared_mean_index, c.lock_serialization_spread, c.contention_delay_assessment
                 ));
             }
-            md.push_str("\n");
+            md.push('\n');
         }
 
         if !saturation_data.is_empty() {
@@ -252,7 +252,7 @@ impl ReportGenerator {
                     s.validator_name, s.client_type, s.density_tier, s.landing_rate_pct, s.spearman_fee, s.mean_index_in_block, s.slot_spread, s.saturation_assessment
                 ));
             }
-            md.push_str("\n");
+            md.push('\n');
         }
 
         md.push_str("---\n\n");
@@ -303,11 +303,11 @@ impl ReportGenerator {
         if let Some(first_burst) = all_bursts.first() {
             md.push_str("### 3. Manual On-Chain Verification Sample:\n");
             md.push_str("```bash\n");
-            md.push_str(&format!("# 1. Verify target block on Solana Mainnet\n"));
+            md.push_str("# 1. Verify target block on Solana Mainnet\n");
             md.push_str(&format!("solana block {} --url https://api.mainnet-beta.solana.com\n\n", first_burst.landed_slot));
             md.push_str("# 2. Query transaction status via JSON-RPC\n");
             if let Some(first_tx) = first_burst.txs.first() {
-                md.push_str(&format!("curl -s -X POST -H \"Content-Type: application/json\" \\\n"));
+                md.push_str("curl -s -X POST -H \"Content-Type: application/json\" \\\n");
                 md.push_str(&format!("  -d '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getTransaction\",\"params\":[\"{}\",{{\"encoding\":\"jsonParsed\",\"maxSupportedTransactionVersion\":1}}]}}' \\\n", first_tx.signature));
                 md.push_str("  https://api.mainnet-beta.solana.com\n");
             }
