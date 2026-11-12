@@ -1,8 +1,12 @@
 use clap::Parser;
 use std::path::PathBuf;
 
+const MAX_LIVE_SPEND_CAP_SOL: f64 = 0.05;
+
 /// Supported experiment suite modes
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize,
+)]
 pub enum ExperimentType {
     /// Standard Ordering: 4 fee perturbation topologies (Ascending, Descending, Alternating, Uniform)
     Ordering,
@@ -54,7 +58,7 @@ pub struct Config {
     #[arg(long, env = "SOLANA_KEYPAIR_PATH")]
     pub keypair_path: Option<PathBuf>,
 
-    /// Maximum SOL allowed to be spent across the entire experiment (SAFETY CAP)
+    /// Maximum SOL allowed to be spent across the entire experiment (live mode is capped at 0.05 SOL)
     #[arg(long, env = "SPEND_CAP_SOL", default_value_t = 0.05)]
     pub spend_cap_sol: f64,
 
@@ -114,6 +118,10 @@ impl Config {
             );
         }
 
+        if !self.spend_cap_sol.is_finite() || self.spend_cap_sol < 0.0 {
+            anyhow::bail!("SAFETY ERROR: --spend-cap-sol must be a finite, non-negative value.");
+        }
+
         if self.live {
             if self.keypair_path.is_none() {
                 anyhow::bail!(
@@ -123,10 +131,10 @@ impl Config {
             if self.spend_cap_sol <= 0.0 {
                 anyhow::bail!("SAFETY ERROR: --spend-cap-sol must be strictly positive (> 0.0).");
             }
-            if self.spend_cap_sol > 0.10 {
+            if self.spend_cap_sol > MAX_LIVE_SPEND_CAP_SOL {
                 anyhow::bail!(
-                    "SAFETY ERROR: Spend cap ({:.4} SOL) exceeds maximum safe limit (0.10 SOL).",
-                    self.spend_cap_sol
+                    "SAFETY ERROR: Spend cap ({:.6} SOL) exceeds the maximum allowed live spend (0.050000 SOL).",
+                    self.spend_cap_sol,
                 );
             }
         }
@@ -146,5 +154,47 @@ impl Config {
     #[allow(dead_code)]
     pub fn spend_cap_lamports(&self) -> u64 {
         (self.spend_cap_sol * 1_000_000_000.0).round() as u64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn live_config(spend_cap_sol: &str) -> Config {
+        let spend_cap_arg = format!("--spend-cap-sol={spend_cap_sol}");
+        Config::try_parse_from([
+            "solana-validator-ordering",
+            "--live",
+            "--keypair-path",
+            "test-keypair.json",
+            spend_cap_arg.as_str(),
+        ])
+        .expect("test arguments should parse")
+    }
+
+    #[test]
+    fn live_spend_cap_accepts_bounty_limit() {
+        let config = live_config("0.05");
+
+        assert!(config.validate().is_ok());
+        assert_eq!(config.spend_cap_lamports(), 50_000_000);
+    }
+
+    #[test]
+    fn live_spend_cap_rejects_values_above_bounty_limit() {
+        let config = live_config("0.050000001");
+
+        let error = config.validate().expect_err("cap above 0.05 SOL must fail");
+
+        assert!(error.to_string().contains("0.050000 SOL"));
+    }
+
+    #[test]
+    fn live_spend_cap_rejects_non_finite_values() {
+        for value in ["NaN", "inf", "-inf"] {
+            let config = live_config(value);
+            assert!(config.validate().is_err(), "{value} must be rejected");
+        }
     }
 }
