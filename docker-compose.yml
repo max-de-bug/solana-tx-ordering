@@ -50,7 +50,7 @@ services:
       - SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
       - SPEND_CAP_SOL=${SPEND_CAP_SOL:-0.05}
       - PORT=1995
-    command: ["--dry-run", "--experiment", "contention", "--serve-dashboard", "--port", "1995"]
+    command: ["--dry-run", "--payer-mode", "independent", "--serve-dashboard", "--port", "1995"]
     profiles:
       - contention
 
@@ -70,7 +70,7 @@ services:
       - SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
       - SPEND_CAP_SOL=${SPEND_CAP_SOL:-0.05}
       - PORT=1995
-    command: ["--dry-run", "--experiment", "saturation", "--serve-dashboard", "--port", "1995"]
+    command: ["--dry-run", "--burst-size", "16", "--serve-dashboard", "--port", "1995"]
     profiles:
       - saturation
 
@@ -90,7 +90,7 @@ services:
       - SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
       - SPEND_CAP_SOL=${SPEND_CAP_SOL:-0.05}
       - PORT=1995
-    command: ["--dry-run", "--experiment", "all", "--serve-dashboard", "--port", "1995"]
+    command: ["--dry-run", "--patterns", "ascending,descending,alternating,uniform,randomized", "--serve-dashboard", "--port", "1995"]
     profiles:
       - all
 
