@@ -66,6 +66,32 @@ pub struct LatestBlockhash {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureStatus {
+    pub slot: u64,
+    pub confirmations: Option<usize>,
+    pub err: Option<Value>,
+    pub confirmation_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceSample {
+    pub num_slots: u64,
+    pub sample_period_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EpochSchedule {
+    pub slots_per_epoch: u64,
+    pub leader_schedule_slot_offset: u64,
+    pub warmup: bool,
+    pub first_normal_epoch: u64,
+    pub first_normal_slot: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockTransaction {
     pub signature: String,
     pub index_in_block: usize,
@@ -90,6 +116,7 @@ pub struct DetailedBlock {
 impl RpcClient {
     pub fn new(endpoint: &str) -> Self {
         let http = Client::builder()
+            .user_agent("solana-validator-ordering/2.0")
             .timeout(Duration::from_secs(30))
             .pool_max_idle_per_host(10)
             .build()
@@ -115,7 +142,7 @@ impl RpcClient {
         });
 
         let mut backoff = Duration::from_millis(500);
-        for attempt in 1..=5 {
+        for attempt in 1..=6 {
             let res = self.http.post(&self.endpoint).json(&payload).send().await;
 
             match res {
@@ -130,24 +157,27 @@ impl RpcClient {
                             return Ok(result.clone());
                         }
                         anyhow::bail!("Missing result in RPC response: {:?}", json_val);
-                    } else if status.as_u16() == 429 {
+                    } else if status.as_u16() == 429 || status.is_server_error() {
                         warn!(
-                            "RPC rate-limited (429) on attempt {}. Backing off {:?}...",
-                            attempt, backoff
+                            "RPC HTTP {} on attempt {}. Backing off {:?}...",
+                            status, attempt, backoff
                         );
                         tokio::time::sleep(backoff).await;
-                        backoff *= 2;
+                        backoff = (backoff * 2).min(Duration::from_secs(16));
                     } else {
                         anyhow::bail!("HTTP status error {}: {}", status, method);
                     }
                 }
                 Err(e) => {
-                    if attempt == 5 {
-                        anyhow::bail!("Failed RPC call {} after 5 attempts: {}", method, e);
+                    if attempt == 6 {
+                        anyhow::bail!("Failed RPC call {} after 6 attempts: {}", method, e);
                     }
-                    warn!("RPC connection error on attempt {}: {}. Retrying...", attempt, e);
+                    warn!(
+                        "RPC connection error on attempt {}: {}. Retrying...",
+                        attempt, e
+                    );
                     tokio::time::sleep(backoff).await;
-                    backoff *= 2;
+                    backoff = (backoff * 2).min(Duration::from_secs(16));
                 }
             }
         }
@@ -156,20 +186,60 @@ impl RpcClient {
     }
 
     pub async fn get_slot(&self) -> anyhow::Result<u64> {
-        let res = self.rpc_call("getSlot", json!([{"commitment": "processed"}])).await?;
-        res.as_u64().ok_or_else(|| anyhow::anyhow!("Invalid slot returned"))
+        let res = self
+            .rpc_call("getSlot", json!([{"commitment": "processed"}]))
+            .await?;
+        res.as_u64()
+            .ok_or_else(|| anyhow::anyhow!("Invalid slot returned"))
     }
 
     pub async fn get_balance(&self, pubkey: &str) -> anyhow::Result<u64> {
-        let res = self.rpc_call("getBalance", json!([pubkey, {"commitment": "processed"}])).await?;
+        let res = self
+            .rpc_call("getBalance", json!([pubkey, {"commitment": "processed"}]))
+            .await?;
         let value = res.get("value").and_then(|v| v.as_u64()).unwrap_or(0);
         Ok(value)
     }
 
     pub async fn get_epoch_info(&self) -> anyhow::Result<EpochInfo> {
-        let res = self.rpc_call("getEpochInfo", json!([{"commitment": "processed"}])).await?;
+        let res = self
+            .rpc_call("getEpochInfo", json!([{"commitment": "processed"}]))
+            .await?;
         let info: EpochInfo = serde_json::from_value(res)?;
         Ok(info)
+    }
+
+    pub async fn get_epoch_schedule(&self) -> anyhow::Result<EpochSchedule> {
+        let res = self.rpc_call("getEpochSchedule", json!([])).await?;
+        let schedule: EpochSchedule = serde_json::from_value(res)?;
+        Ok(schedule)
+    }
+
+    pub async fn get_recent_performance_samples(
+        &self,
+        limit: usize,
+    ) -> anyhow::Result<Vec<PerformanceSample>> {
+        let res = self
+            .rpc_call("getRecentPerformanceSamples", json!([limit]))
+            .await?;
+        let samples: Vec<PerformanceSample> = serde_json::from_value(res)?;
+        Ok(samples)
+    }
+
+    /// Estimates slot duration from recent mainnet performance samples.
+    /// Returns `None` when the endpoint does not provide samples.
+    pub async fn estimate_slot_duration_ms(&self) -> anyhow::Result<Option<f64>> {
+        let samples = self.get_recent_performance_samples(60).await?;
+        let mut slots = 0u64;
+        let mut seconds = 0u64;
+        for sample in samples {
+            slots += sample.num_slots;
+            seconds += sample.sample_period_secs;
+        }
+        if slots == 0 || seconds == 0 {
+            return Ok(None);
+        }
+        Ok(Some(seconds as f64 * 1_000.0 / slots as f64))
     }
 
     pub async fn get_cluster_nodes(&self) -> anyhow::Result<Vec<ClusterNodeInfo>> {
@@ -179,19 +249,20 @@ impl RpcClient {
     }
 
     pub async fn get_vote_accounts(&self) -> anyhow::Result<VoteAccountsResponse> {
-        let res = self.rpc_call("getVoteAccounts", json!([{"commitment": "processed"}])).await?;
+        let res = self
+            .rpc_call("getVoteAccounts", json!([{"commitment": "processed"}]))
+            .await?;
         let votes: VoteAccountsResponse = serde_json::from_value(res)?;
         Ok(votes)
     }
 
     pub async fn get_latest_blockhash(&self) -> anyhow::Result<LatestBlockhash> {
         let res = self
-            .rpc_call(
-                "getLatestBlockhash",
-                json!([{"commitment": "processed"}]),
-            )
+            .rpc_call("getLatestBlockhash", json!([{"commitment": "processed"}]))
             .await?;
-        let value = res.get("value").ok_or_else(|| anyhow::anyhow!("Missing blockhash value"))?;
+        let value = res
+            .get("value")
+            .ok_or_else(|| anyhow::anyhow!("Missing blockhash value"))?;
         let bh: LatestBlockhash = serde_json::from_value(value.clone())?;
         Ok(bh)
     }
@@ -209,6 +280,7 @@ impl RpcClient {
         Ok(map)
     }
 
+    #[allow(dead_code)]
     pub async fn send_transaction(&self, base64_tx: &str) -> anyhow::Result<String> {
         let res = self
             .rpc_call(
@@ -219,7 +291,7 @@ impl RpcClient {
                         "encoding": "base64",
                         "skipPreflight": true,
                         "preflightCommitment": "processed",
-                        "maxRetries": 3
+                        "maxRetries": 0
                     }
                 ]),
             )
@@ -230,9 +302,22 @@ impl RpcClient {
             .ok_or_else(|| anyhow::anyhow!("Invalid signature returned from sendTransaction"))
     }
 
-    /// Dispatches a burst of transactions in a single batched JSON-RPC HTTP request
-    /// to minimize client-side inter-packet serialization latency.
-    pub async fn send_transaction_batch(&self, base64_txs: &[String]) -> anyhow::Result<Vec<String>> {
+    /// Dispatches a burst of transactions in a single batched JSON-RPC HTTP
+    /// request to minimize client-side inter-packet serialization latency.
+    #[allow(dead_code)]
+    pub async fn send_transaction_batch(
+        &self,
+        base64_txs: &[String],
+    ) -> anyhow::Result<Vec<String>> {
+        self.send_transaction_batch_with_retries(base64_txs, 0)
+            .await
+    }
+
+    pub async fn send_transaction_batch_with_retries(
+        &self,
+        base64_txs: &[String],
+        max_retries: u32,
+    ) -> anyhow::Result<Vec<String>> {
         if base64_txs.is_empty() {
             return Ok(Vec::new());
         }
@@ -251,7 +336,7 @@ impl RpcClient {
                             "encoding": "base64",
                             "skipPreflight": true,
                             "preflightCommitment": "processed",
-                            "maxRetries": 3
+                            "maxRetries": max_retries
                         }
                     ]
                 })
@@ -277,11 +362,44 @@ impl RpcClient {
         Ok(sigs)
     }
 
+    pub async fn get_signature_statuses(
+        &self,
+        signatures: &[String],
+    ) -> anyhow::Result<Vec<Option<SignatureStatus>>> {
+        if signatures.is_empty() {
+            return Ok(Vec::new());
+        }
+        let res = self
+            .rpc_call(
+                "getSignatureStatuses",
+                json!([signatures, {"searchTransactionHistory": true}]),
+            )
+            .await?;
+        let values = res
+            .get("value")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut out = Vec::with_capacity(signatures.len());
+        for value in values {
+            if value.is_null() {
+                out.push(None);
+            } else {
+                out.push(Some(serde_json::from_value(value)?));
+            }
+        }
+        // RPC should return one entry per signature; pad defensively.
+        while out.len() < signatures.len() {
+            out.push(None);
+        }
+        Ok(out)
+    }
+
     #[allow(dead_code)]
     pub async fn get_signature_status(
         &self,
         signature: &str,
-    ) -> anyhow::Result<Option<u64>> {
+    ) -> anyhow::Result<Option<SignatureStatus>> {
         let res = self
             .rpc_call(
                 "getSignatureStatuses",
@@ -290,10 +408,11 @@ impl RpcClient {
             .await?;
 
         if let Some(statuses) = res.get("value").and_then(|v| v.as_array()) {
-            if let Some(status) = statuses.first().and_then(|s| s.as_object()) {
-                if let Some(slot) = status.get("slot").and_then(|s| s.as_u64()) {
-                    return Ok(Some(slot));
+            if let Some(value) = statuses.first() {
+                if value.is_null() {
+                    return Ok(None);
                 }
+                return Ok(Some(serde_json::from_value(value.clone())?));
             }
         }
         Ok(None)
@@ -327,10 +446,7 @@ impl RpcClient {
             .and_then(|b| b.as_str())
             .unwrap_or("")
             .to_string();
-        let parent_slot = res
-            .get("parentSlot")
-            .and_then(|p| p.as_u64())
-            .unwrap_or(0);
+        let parent_slot = res.get("parentSlot").and_then(|p| p.as_u64()).unwrap_or(0);
         let block_time = res.get("blockTime").and_then(|t| t.as_i64());
 
         let raw_txs = res

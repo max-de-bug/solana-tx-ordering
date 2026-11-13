@@ -1,514 +1,580 @@
-use crate::analyzer::{Analyzer, BurstAnalysisResult, ContentionBenchmarkResult, ValidatorAggregatedResult};
+use crate::analyzer::{
+    Analyzer, BurstAnalysisResult, BurstProvenance, ExecutionMode, PayerMode, TransportKind,
+};
+use crate::campaign::save_block_in;
 use crate::config::Config;
 use crate::leader_schedule::{LeaderScheduleManager, LeaderWindow};
-use crate::rpc::{self, DetailedBlock, RpcClient};
+use crate::payer::PayerPool;
+use crate::rpc::{DetailedBlock, RpcClient};
 use crate::spend_tracker::SpendTracker;
+use crate::transport::{parse_tpu_addr, TpuSender};
 use crate::tx_crafting::{BurstPattern, CraftedTxMetadata, TxCrafter};
-use crate::validator_info::{ClientType, TargetValidator};
-use solana_sdk::signature::Keypair;
+use crate::validator_info::TargetValidator;
+use anyhow::{Context, Result};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+use solana_sdk::hash::Hash;
+use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
-/// Saturation benchmark metrics tracking queue depth and multi-slot dispersion under load
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SaturationBenchmarkResult {
-    pub validator_identity: String,
-    pub validator_name: String,
-    pub client_type: ClientType,
-    pub density_tier: usize,
-    pub total_sent: usize,
-    pub total_landed: usize,
-    pub landing_rate_pct: f64,
-    pub spearman_fee: f64,
-    pub kendall_tau: f64,
-    pub mean_index_in_block: f64,
-    pub slot_spread: usize,
-    pub saturation_assessment: String,
+#[derive(Debug, Clone, Default)]
+pub struct ExperimentOutput {
+    pub bursts: Vec<BurstAnalysisResult>,
+    pub failed_tasks: usize,
+    pub total_tx_sent: usize,
+    pub total_tx_landed: usize,
 }
 
-pub struct ExperimentEngine;
+#[derive(Debug, Clone)]
+struct Task {
+    validator: TargetValidator,
+    window: LeaderWindow,
+    pattern: BurstPattern,
+    repetition: usize,
+}
+
+pub struct ExperimentEngine {
+    config: Config,
+    rpc: RpcClient,
+    schedule: LeaderScheduleManager,
+    spend: SpendTracker,
+    payers: PayerPool,
+    campaign_dir: PathBuf,
+    dry_run: bool,
+}
 
 impl ExperimentEngine {
-    /// 1. Runs the Standard Ordering Experiment (4 fee topologies: Ascending, Descending, Alternating, Uniform)
-    pub async fn run_ordering_experiment(
-        config: &Config,
-        rpc: &Arc<RpcClient>,
-        schedule_mgr: &LeaderScheduleManager,
-        validators: &[TargetValidator],
-        payer: &Keypair,
-        spend_tracker: &SpendTracker,
-        is_live: bool,
-    ) -> anyhow::Result<(Vec<ValidatorAggregatedResult>, Vec<BurstAnalysisResult>)> {
-        let patterns = [
-            BurstPattern::AscendingFee,
-            BurstPattern::DescendingFee,
-            BurstPattern::AlternatingFee,
-            BurstPattern::UniformFee,
-        ];
+    pub fn new(
+        config: Config,
+        rpc: RpcClient,
+        schedule: LeaderScheduleManager,
+        spend: SpendTracker,
+        payers: PayerPool,
+        campaign_dir: PathBuf,
+    ) -> Self {
+        let dry_run = !config.live;
+        Self {
+            config,
+            rpc,
+            schedule,
+            spend,
+            payers,
+            campaign_dir,
+            dry_run,
+        }
+    }
 
-        let mut all_bursts = Vec::new();
-        let current_slot = rpc.get_slot().await.unwrap_or(465_042_000);
+    pub async fn run(&mut self, validators: &[TargetValidator]) -> Result<ExperimentOutput> {
+        let tasks = self.build_tasks(validators).await?;
+        if tasks.is_empty() {
+            anyhow::bail!("no leader windows available for the selected validators");
+        }
+        info!(
+            "Starting {} ({} tasks, {} validators, transport {}, payer mode {})",
+            if self.dry_run {
+                "dry-run"
+            } else {
+                "LIVE campaign"
+            },
+            tasks.len(),
+            validators.len(),
+            self.config.transport_kind(),
+            self.config.payer_mode_kind()
+        );
 
-        for (v_idx, validator) in validators.iter().enumerate() {
-            let current_slot = rpc.get_slot().await.unwrap_or(current_slot);
-            info!("============================================================");
-            info!(
-                "[Experiment 1: Ordering] Validator {}/{}: {} ({}) [slot: {}]",
-                v_idx + 1,
-                validators.len(),
-                validator.name,
-                validator.client_type,
-                current_slot
-            );
-
-            let upcoming_windows = schedule_mgr.find_upcoming_windows(&validator.identity, current_slot, patterns.len());
-
-            for (p_idx, &pattern) in patterns.iter().enumerate() {
-                let window = match upcoming_windows.get(p_idx) {
-                    Some(w) => w.clone(),
-                    None => {
-                        warn!("Synthesizing fallback window for {} pattern {:?}", validator.name, pattern);
-                        LeaderWindow {
-                            validator_identity: validator.identity.clone(),
-                            start_slot: current_slot + 20 + (v_idx as u64 * 30) + (p_idx as u64 * 5),
-                            end_slot: current_slot + 23 + (v_idx as u64 * 30) + (p_idx as u64 * 5),
-                            window_length: 4,
-                            estimated_start_time_ms: 1000,
+        let mut output = ExperimentOutput::default();
+        for (task_idx, task) in tasks.iter().enumerate() {
+            match self.run_task(task, task_idx).await {
+                Ok((burst, blocks)) => {
+                    for block in &blocks {
+                        if let Err(e) = save_block_in(&self.campaign_dir, block) {
+                            warn!("could not save raw block {}: {e}", block.slot);
                         }
                     }
-                };
-
-                schedule_mgr.wait_for_window(rpc, &window, !is_live).await?;
-
-                let burst_id = format!("{}-{}-p{}", &validator.identity[..6.min(validator.identity.len())], window.start_slot, p_idx);
-                info!("Deploying burst {} with pattern {:?}", burst_id, pattern);
-
-                let recent_bh = match rpc.get_latest_blockhash().await {
-                    Ok(bh) => solana_sdk::hash::Hash::from_str(&bh.blockhash).unwrap_or_default(),
-                    Err(_) => solana_sdk::hash::Hash::default(),
-                };
-
-                let burst_txs = TxCrafter::build_burst(payer, recent_bh, &burst_id, config.burst_size, pattern);
-
-                if !Self::dispatch_burst(rpc, spend_tracker, &burst_txs, is_live).await {
-                    continue;
+                    output.total_tx_sent += burst.total_tx_sent;
+                    output.total_tx_landed += burst.total_tx_landed;
+                    output.bursts.push(burst);
                 }
-
-                let block = Self::fetch_or_simulate_block(rpc, window.start_slot, &burst_txs, validator, pattern, is_live).await?;
-                let burst_analysis = Analyzer::match_burst_in_block(&burst_txs, &block, validator, window.start_slot);
-                info!(
-                    "Burst Result: Landed {}/{} txs ({:.1}%) | Spearman Fee ρ: {:+.3} (p={:.3}) | Rule: {}",
-                    burst_analysis.total_tx_landed,
-                    burst_analysis.total_tx_sent,
-                    burst_analysis.landing_rate_pct,
-                    burst_analysis.spearman_fee_correlation,
-                    burst_analysis.p_value_fee,
-                    burst_analysis.burst_classification
-                );
-
-                all_bursts.push(burst_analysis);
+                Err(e) => {
+                    output.failed_tasks += 1;
+                    warn!(
+                        "task {} for {} at slot {} failed: {e:#}",
+                        task_idx, task.validator.identity, task.window.start_slot
+                    );
+                }
             }
         }
-
-        let mut aggregated = Vec::new();
-        for validator in validators {
-            aggregated.push(Analyzer::aggregate_validator(validator, &all_bursts));
-        }
-
-        Ok((aggregated, all_bursts))
+        Ok(output)
     }
 
-    /// 2. Runs the Write-Lock Contention Benchmark (Shared Payer vs Independent Payers)
-    pub async fn run_contention_experiment(
-        config: &Config,
-        rpc: &Arc<RpcClient>,
-        schedule_mgr: &LeaderScheduleManager,
-        validators: &[TargetValidator],
-        payer: &Keypair,
-        spend_tracker: &SpendTracker,
-        is_live: bool,
-    ) -> anyhow::Result<(Vec<ContentionBenchmarkResult>, Vec<BurstAnalysisResult>)> {
-        info!("============================================================");
-        info!("RUNNING WRITE-LOCK CONTENTION BENCHMARK: SHARED VS INDEPENDENT PAYERS");
-        info!("============================================================");
+    async fn build_tasks(&self, validators: &[TargetValidator]) -> Result<Vec<Task>> {
+        let patterns = self.config.burst_patterns();
+        if patterns.is_empty() {
+            anyhow::bail!("no burst patterns selected");
+        }
+        let needed = patterns.len() * self.config.repetitions;
+        let current_slot = if self.dry_run {
+            465_000_000
+        } else {
+            self.rpc.get_slot().await?
+        };
 
-        let mut contention_results = Vec::new();
-        let mut all_bursts = Vec::new();
-        let current_slot = rpc.get_slot().await.unwrap_or(465_042_000);
-
-        for (v_idx, validator) in validators.iter().enumerate() {
-            let current_slot = rpc.get_slot().await.unwrap_or(current_slot);
-            info!(
-                "[Experiment 2: Contention] Validator {}/{}: {} ({})",
-                v_idx + 1,
-                validators.len(),
-                validator.name,
-                validator.client_type
-            );
-
-            let upcoming_windows = schedule_mgr.find_upcoming_windows(&validator.identity, current_slot, 2);
-            let window = upcoming_windows.first().cloned().unwrap_or_else(|| {
-                LeaderWindow {
-                    validator_identity: validator.identity.clone(),
-                    start_slot: current_slot + 20 + (v_idx as u64 * 30),
-                    end_slot: current_slot + 23 + (v_idx as u64 * 30),
-                    window_length: 4,
-                    estimated_start_time_ms: 1000,
-                }
-            });
-
-            let recent_bh = match rpc.get_latest_blockhash().await {
-                Ok(bh) => solana_sdk::hash::Hash::from_str(&bh.blockhash).unwrap_or_default(),
-                Err(_) => solana_sdk::hash::Hash::default(),
+        let mut tasks = Vec::new();
+        for (validator_idx, validator) in validators.iter().enumerate() {
+            let windows = if self.dry_run {
+                (0..needed)
+                    .map(|i| LeaderWindow {
+                        validator_identity: validator.identity.clone(),
+                        start_slot: current_slot
+                            + 40
+                            + (validator_idx as u64 * 30)
+                            + (i as u64 * 12),
+                        end_slot: current_slot + 43 + (validator_idx as u64 * 30) + (i as u64 * 12),
+                        window_length: 4,
+                        estimated_start_time_ms: (i as u64 + 1) * 5_000,
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                self.schedule
+                    .find_upcoming_windows(&validator.identity, current_slot, needed)
             };
 
-            let burst_id_prefix = format!("{}-{}", &validator.identity[..6.min(validator.identity.len())], window.start_slot);
-            let (indep_txs, shared_txs) = TxCrafter::build_contention_pair(
-                payer,
-                recent_bh,
-                &burst_id_prefix,
-                config.burst_size,
-                BurstPattern::AscendingFee,
-            );
-
-            schedule_mgr.wait_for_window(rpc, &window, !is_live).await?;
-
-            // Process Independent burst (zero lock contention)
-            Self::dispatch_burst(rpc, spend_tracker, &indep_txs, is_live).await;
-            let block_indep = Self::fetch_or_simulate_block(rpc, window.start_slot, &indep_txs, validator, BurstPattern::AscendingFee, is_live).await?;
-            let indep_analysis = Analyzer::match_burst_in_block(&indep_txs, &block_indep, validator, window.start_slot);
-
-            // Process Shared burst (Sealevel write-lock contention)
-            Self::dispatch_burst(rpc, spend_tracker, &shared_txs, is_live).await;
-            let block_shared = Self::fetch_or_simulate_block(rpc, window.start_slot, &shared_txs, validator, BurstPattern::AscendingFee, is_live).await?;
-            let shared_analysis = Analyzer::match_burst_in_block(&shared_txs, &block_shared, validator, window.start_slot);
-
-            let comp = Analyzer::compare_contention_pair(validator, &indep_analysis, &shared_analysis);
-            info!(
-                "Contention Result [{}]: Indep Mean Idx: {:.1} vs Shared Mean Idx: {:.1} (Spread: {:+.1}) | {}",
-                validator.name,
-                comp.independent_mean_index,
-                comp.shared_mean_index,
-                comp.lock_serialization_spread,
-                comp.contention_delay_assessment
-            );
-
-            all_bursts.push(indep_analysis);
-            all_bursts.push(shared_analysis);
-            contention_results.push(comp);
-        }
-
-        Self::print_contention_summary(&contention_results);
-        Ok((contention_results, all_bursts))
-    }
-
-    /// 3. Runs the Queue Saturation Benchmark (tests scaling burst sizes: N = 8, 16, 32)
-    pub async fn run_saturation_experiment(
-        _config: &Config,
-        rpc: &Arc<RpcClient>,
-        schedule_mgr: &LeaderScheduleManager,
-        validators: &[TargetValidator],
-        payer: &Keypair,
-        spend_tracker: &SpendTracker,
-        is_live: bool,
-    ) -> anyhow::Result<(Vec<SaturationBenchmarkResult>, Vec<BurstAnalysisResult>)> {
-        info!("============================================================");
-        info!("RUNNING QUEUE SATURATION BENCHMARK: BURST SIZES N = 8, 16, 32");
-        info!("============================================================");
-
-        let density_tiers = [8, 16, 32];
-        let mut saturation_results = Vec::new();
-        let mut all_bursts = Vec::new();
-        let current_slot = rpc.get_slot().await.unwrap_or(465_042_000);
-
-        for (v_idx, validator) in validators.iter().enumerate() {
-            let current_slot = rpc.get_slot().await.unwrap_or(current_slot);
-            info!(
-                "[Experiment 3: Saturation] Validator {}/{}: {} ({})",
-                v_idx + 1,
-                validators.len(),
-                validator.name,
-                validator.client_type
-            );
-
-            let upcoming_windows = schedule_mgr.find_upcoming_windows(&validator.identity, current_slot, density_tiers.len());
-
-            for (t_idx, &density) in density_tiers.iter().enumerate() {
-                let window = match upcoming_windows.get(t_idx) {
-                    Some(w) => w.clone(),
-                    None => LeaderWindow {
-                        validator_identity: validator.identity.clone(),
-                        start_slot: current_slot + 20 + (v_idx as u64 * 40) + (t_idx as u64 * 6),
-                        end_slot: current_slot + 23 + (v_idx as u64 * 40) + (t_idx as u64 * 6),
-                        window_length: 4,
-                        estimated_start_time_ms: 1000,
-                    },
-                };
-
-                schedule_mgr.wait_for_window(rpc, &window, !is_live).await?;
-
-                let burst_id = format!("{}-{}-sat-n{}", &validator.identity[..6.min(validator.identity.len())], window.start_slot, density);
-                let recent_bh = match rpc.get_latest_blockhash().await {
-                    Ok(bh) => solana_sdk::hash::Hash::from_str(&bh.blockhash).unwrap_or_default(),
-                    Err(_) => solana_sdk::hash::Hash::default(),
-                };
-
-                let burst_txs = TxCrafter::build_burst(payer, recent_bh, &burst_id, density, BurstPattern::DescendingFee);
-                Self::dispatch_burst(rpc, spend_tracker, &burst_txs, is_live).await;
-                let block = Self::fetch_or_simulate_block(rpc, window.start_slot, &burst_txs, validator, BurstPattern::DescendingFee, is_live).await?;
-                let analysis = Analyzer::match_burst_in_block(&burst_txs, &block, validator, window.start_slot);
-
-                let mean_idx = if !analysis.txs.is_empty() {
-                    analysis.txs.iter().map(|t| t.index_in_block as f64).sum::<f64>() / analysis.txs.len() as f64
-                } else {
-                    0.0
-                };
-
-                let unique_slots: std::collections::HashSet<u64> = analysis.txs.iter().map(|t| t.landed_in_slot).collect();
-                let slot_spread = unique_slots.len().max(1);
-
-                let assessment = if slot_spread > 1 {
-                    format!("Multi-slot overflow detected across {} slots in leader window under {} tx load.", slot_spread, density)
-                } else if analysis.spearman_fee_correlation > 0.70 {
-                    format!("Queue maintained strict fee sorting (ρ = {:+.2}) under {} tx load.", analysis.spearman_fee_correlation, density)
-                } else {
-                    format!("Interleaved placement under {} tx load.", density)
-                };
-
-                info!(
-                    "Saturation [{} @ N={}]: Landed {}/{} | Spearman ρ: {:+.3} | Mean Idx: {:.1} | Slots: {} | {}",
-                    validator.name,
-                    density,
-                    analysis.total_tx_landed,
-                    analysis.total_tx_sent,
-                    analysis.spearman_fee_correlation,
-                    mean_idx,
-                    slot_spread,
-                    assessment
+            if windows.len() < needed {
+                warn!(
+                    "validator {} has only {} upcoming window(s) in the loaded epoch; needed {}",
+                    validator.identity,
+                    windows.len(),
+                    needed
                 );
+            }
 
-                saturation_results.push(SaturationBenchmarkResult {
-                    validator_identity: validator.identity.clone(),
-                    validator_name: validator.name.clone(),
-                    client_type: validator.client_type,
-                    density_tier: density,
-                    total_sent: analysis.total_tx_sent,
-                    total_landed: analysis.total_tx_landed,
-                    landing_rate_pct: analysis.landing_rate_pct,
-                    spearman_fee: analysis.spearman_fee_correlation,
-                    kendall_tau: analysis.kendall_tau_fee,
-                    mean_index_in_block: mean_idx,
-                    slot_spread,
-                    saturation_assessment: assessment,
+            for (window_idx, window) in windows.into_iter().enumerate() {
+                let pattern = patterns[window_idx % patterns.len()];
+                let repetition = window_idx / patterns.len();
+                tasks.push(Task {
+                    validator: validator.clone(),
+                    window,
+                    pattern,
+                    repetition,
                 });
-
-                all_bursts.push(analysis);
             }
         }
 
-        Self::print_saturation_summary(&saturation_results);
-        Ok((saturation_results, all_bursts))
+        tasks.sort_by_key(|t| t.window.start_slot);
+        Ok(tasks)
     }
 
-    /// Block fetching and realistic scheduler simulation helper
-    pub async fn fetch_or_simulate_block(
-        rpc: &RpcClient,
-        slot: u64,
-        burst_txs: &[CraftedTxMetadata],
-        validator: &TargetValidator,
-        _pattern: BurstPattern,
-        is_live: bool,
-    ) -> anyhow::Result<DetailedBlock> {
-        if is_live {
-            info!("Awaiting transaction confirmation across leader window (target slot: {})...", slot);
-            let mut detected_slot = None;
-
-            for attempt in 1..=8 {
-                tokio::time::sleep(Duration::from_millis(1000)).await;
-                for tx in burst_txs {
-                    if let Ok(Some(s)) = rpc.get_signature_status(&tx.signature).await {
-                        info!("Transaction {} confirmed in slot {} (attempt {})", &tx.signature[..12], s, attempt);
-                        detected_slot = Some(s);
-                        break;
-                    }
-                }
-                if detected_slot.is_some() {
-                    break;
-                }
-            }
-
-            let query_slot = detected_slot.unwrap_or(slot);
-            info!("Querying confirmed Mainnet block for slot {}...", query_slot);
-
-            for attempt in 1..=5 {
-                match rpc.get_block(query_slot).await {
-                    Ok(block) => {
-                        info!(
-                            "Successfully fetched real Mainnet block {} with {} confirmed transactions!",
-                            query_slot, block.total_transactions
-                        );
-                        return Ok(block);
-                    }
-                    Err(e) => {
-                        warn!("Block {} not ready yet (attempt {}): {}. Retrying in 1.5s...", query_slot, attempt, e);
-                        tokio::time::sleep(Duration::from_millis(1500)).await;
-                    }
-                }
-            }
-        }
-
-        // In dry-run mode, synthesize realistic block order adhering to client fork scheduler
-        let is_independent = burst_txs.first().map(|t| t.memo_payload.contains("independent=true")).unwrap_or(false);
-        let base_offset = match validator.client_type {
-            ClientType::JitoSolana => 65,
-            _ => 25,
+    async fn run_task(
+        &mut self,
+        task: &Task,
+        task_idx: usize,
+    ) -> Result<(BurstAnalysisResult, Vec<DetailedBlock>)> {
+        let burst_id = format!(
+            "{}-{}-{}-r{}",
+            short_identity(&task.validator.identity),
+            task.window.start_slot,
+            task.pattern,
+            task.repetition
+        );
+        let send_slot_target = task.window.send_slot(self.config.send_lead_slots);
+        let transport = if self.dry_run {
+            TransportKind::Synthetic
+        } else {
+            self.config.transport_kind()
         };
-        let spacing = if is_independent { 2 } else { 5 };
-        let total_block_txs = 600.max(base_offset + burst_txs.len() * (spacing + 2));
 
-        let mut block_transactions = Vec::with_capacity(total_block_txs);
+        let observed_send_slot = if self.dry_run {
+            send_slot_target
+        } else {
+            self.schedule
+                .wait_until_slot(&self.rpc, send_slot_target, false)
+                .await?
+        };
 
-        for i in 0..total_block_txs {
-            block_transactions.push(rpc::BlockTransaction {
-                signature: format!("simBgTx{:04}...", i),
-                index_in_block: i,
-                fee: 5000,
-                compute_units_consumed: Some(450),
-                err: None,
-                memo: None,
-                priority_fee_micro_lamports: None,
-            });
+        let late_send = observed_send_slot >= task.window.start_slot;
+        if late_send && !self.dry_run {
+            warn!(
+                "SKIP {}: observed send slot {} is not before target window start {}",
+                burst_id, observed_send_slot, task.window.start_slot
+            );
+            // A skipped burst is still accounted for by the caller as a failed
+            // timing attempt; no transaction is fabricated or broadcast.
+            anyhow::bail!(
+                "late send: observed slot {} >= target slot {}",
+                observed_send_slot,
+                task.window.start_slot
+            );
         }
 
-        let mut sorted_burst = burst_txs.to_vec();
+        let recent_blockhash = if self.dry_run {
+            Hash::default()
+        } else {
+            let bh = self.rpc.get_latest_blockhash().await?;
+            Hash::from_str(&bh.blockhash)
+                .with_context(|| format!("invalid blockhash {}", bh.blockhash))?
+        };
 
-        match validator.client_type {
-            ClientType::Firedancer => {
-                sorted_burst.sort_by(|a, b| b.priority_fee_micro_lamports.cmp(&a.priority_fee_micro_lamports));
+        let independent = self.config.payer_mode_kind() == PayerMode::Independent;
+        let payer_refs = self.payers.for_burst(self.config.burst_size, independent)?;
+        let seed = self
+            .config
+            .seed
+            .wrapping_add((task_idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let mut metadata = TxCrafter::build_burst_with_payers(
+            &payer_refs,
+            recent_blockhash,
+            &burst_id,
+            self.config.burst_size,
+            task.pattern,
+            seed,
+            task.pattern == BurstPattern::RandomizedFee,
+        );
+
+        let estimated_total: u64 = metadata.iter().map(|m| m.estimated_fee_lamports).sum();
+        let reservation = self.spend.try_reserve(estimated_total)?;
+
+        let send_started_ns = now_ns();
+        let send_started = Instant::now();
+        let send_results: Vec<Result<(), String>> = if self.dry_run {
+            metadata.iter().map(|_| Ok(())).collect()
+        } else {
+            self.dispatch(&task.validator, &metadata).await?
+        };
+        let send_finished_ns = now_ns();
+        let send_elapsed_ms = send_started.elapsed().as_millis() as u64;
+
+        let mut accepted = 0usize;
+        for (meta, result) in metadata.iter_mut().zip(send_results.iter()) {
+            if let Err(e) = result {
+                meta.send_error = Some(e.clone());
+            } else {
+                accepted += 1;
+                self.spend.record_sent();
             }
-            ClientType::JitoSolana => {
-                sorted_burst.sort_by(|a, b| b.priority_fee_micro_lamports.cmp(&a.priority_fee_micro_lamports));
-            }
-            ClientType::Agave => {
-                sorted_burst.sort_by(|a, b| b.priority_fee_micro_lamports.cmp(&a.priority_fee_micro_lamports));
-                if sorted_burst.len() > 3 && is_independent {
-                    sorted_burst.swap(1, 2);
-                }
-            }
-            ClientType::AgaveBam => {
-                sorted_burst.sort_by(|a, b| b.priority_fee_micro_lamports.cmp(&a.priority_fee_micro_lamports));
-            }
-            _ => {}
         }
 
-        for (idx, tx) in sorted_burst.iter().enumerate() {
-            let target_idx = base_offset + (idx * spacing);
-            if target_idx < block_transactions.len() {
-                block_transactions[target_idx] = rpc::BlockTransaction {
-                    signature: tx.signature.clone(),
-                    index_in_block: target_idx,
-                    fee: tx.estimated_fee_lamports,
-                    compute_units_consumed: Some(tx.compute_unit_limit as u64),
-                    err: None,
-                    memo: Some(tx.memo_payload.clone()),
-                    priority_fee_micro_lamports: Some(tx.priority_fee_micro_lamports),
+        if accepted == 0 {
+            drop(reservation);
+            anyhow::bail!("all {} probes failed to dispatch", metadata.len());
+        }
+        // The fee is deterministic from the requested CU limit and price. Commit
+        // the intended fee for accepted probes; rejected probes never paid.
+        let committed: u64 = metadata
+            .iter()
+            .filter(|m| m.send_error.is_none())
+            .map(|m| m.estimated_fee_lamports)
+            .sum();
+        reservation.commit(committed)?;
+
+        let signatures: Vec<String> = metadata.iter().map(|m| m.signature.clone()).collect();
+        let (blocks, target_block_fetched, target_block_hash) = if self.dry_run {
+            let block = simulate_block(
+                &metadata,
+                task.window.start_slot,
+                self.config.seed ^ task_idx as u64,
+            );
+            let hash = block.blockhash.clone();
+            (vec![block], true, hash)
+        } else {
+            self.collect_blocks(&signatures, task.window.start_slot)
+                .await?
+        };
+
+        let provenance = BurstProvenance {
+            execution_mode: if self.dry_run {
+                ExecutionMode::DryRun
+            } else {
+                ExecutionMode::Live
+            },
+            design_version: 2,
+            transport,
+            payer_mode: self.config.payer_mode_kind(),
+            send_slot: observed_send_slot,
+            send_started_ns,
+            send_finished_ns,
+            late_send,
+            target_window_start: task.window.start_slot,
+            target_window_end: task.window.start_slot + self.config.target_window_slots - 1,
+            target_block_fetched,
+            target_block_hash,
+            memo_prefix: crate::tx_crafting::MEMO_PREFIX.to_string(),
+            send_order_randomized: task.pattern == BurstPattern::RandomizedFee,
+            fee_assignment_randomized: task.pattern == BurstPattern::RandomizedFee,
+        };
+
+        let result = Analyzer::match_burst_in_blocks(
+            &metadata,
+            &blocks,
+            &task.validator,
+            task.window.start_slot,
+            provenance.target_window_end,
+            provenance,
+        );
+        for _ in 0..result.txs.len() {
+            self.spend.record_confirmed();
+        }
+
+        info!(
+            "{}: target {} observed_send {} dispatch {:.1} ms accepted {}/{} landed {} target_block {}",
+            burst_id,
+            task.window.start_slot,
+            observed_send_slot,
+            send_elapsed_ms,
+            accepted,
+            metadata.len(),
+            result.txs.len(),
+            result.target_block_probes()
+        );
+
+        Ok((result, blocks))
+    }
+
+    async fn dispatch(
+        &self,
+        validator: &TargetValidator,
+        metadata: &[CraftedTxMetadata],
+    ) -> Result<Vec<Result<(), String>>> {
+        match self.config.transport {
+            crate::config::TransportArg::TpuQuic => {
+                let Some(tpu_addr) = validator.tpu_ip.as_deref() else {
+                    anyhow::bail!(
+                        "validator {} has no tpuQuic address; use --transport rpc or a validator with tpuQuic",
+                        validator.identity
+                    );
                 };
+                let addr = parse_tpu_addr(tpu_addr)?;
+                let sender = TpuSender::new(addr)?;
+                sender.warmup().await?;
+                let wires: Vec<Vec<u8>> = metadata
+                    .iter()
+                    .map(|m| m.wire_bytes())
+                    .collect::<Result<Vec<_>>>()?;
+                let results = sender.send_batch(&wires).await;
+                sender.close().await;
+                Ok(results
+                    .into_iter()
+                    .map(|r| r.map_err(|e| format!("{e:#}")))
+                    .collect())
             }
-        }
-
-        Ok(DetailedBlock {
-            slot,
-            blockhash: "4uQeVj5tqViQh7yWWGStvkEG1Zmhx6uasJtWCJziofM".to_string(),
-            previous_blockhash: "3kQeVj5tqViQh7yWWGStvkEG1Zmhx6uasJtWCJziofM".to_string(),
-            parent_slot: slot - 1,
-            block_time: Some(chrono::Utc::now().timestamp()),
-            total_transactions: block_transactions.len(),
-            transactions: block_transactions,
-        })
-    }
-
-    /// Dispatches a burst of transactions to the cluster when in live mode, enforcing the spend tracker
-    async fn dispatch_burst(
-        rpc: &RpcClient,
-        spend_tracker: &SpendTracker,
-        burst_txs: &[CraftedTxMetadata],
-        is_live: bool,
-    ) -> bool {
-        if !is_live {
-            return true;
-        }
-
-        let total_burst_fee: u64 = burst_txs.iter().map(|t| t.estimated_fee_lamports).sum();
-        if let Err(e) = spend_tracker.pre_check_spend(total_burst_fee) {
-            warn!("Spend cap prevented burst: {}", e);
-            return false;
-        }
-
-        let payloads: Vec<String> = burst_txs.iter().map(|t| t.base64_payload.clone()).collect();
-        match rpc.send_transaction_batch(&payloads).await {
-            Ok(sigs) => {
-                info!("Broadcast batch of {} transactions ({} sigs)", payloads.len(), sigs.len());
-                for (tx, sig) in burst_txs.iter().zip(sigs.iter()) {
-                    info!("Broadcast tx: {}", sig);
-                    spend_tracker.increment_sent();
-                    spend_tracker.record_spend(tx.estimated_fee_lamports);
-                }
-            }
-            Err(e) => {
-                warn!("Batch failed ({}), falling back to sequential dispatch...", e);
-                for tx in burst_txs {
-                    if let Ok(_sig) = rpc.send_transaction(&tx.base64_payload).await {
-                        spend_tracker.increment_sent();
-                        spend_tracker.record_spend(tx.estimated_fee_lamports);
+            crate::config::TransportArg::Rpc => {
+                let payloads: Vec<String> =
+                    metadata.iter().map(|m| m.base64_payload.clone()).collect();
+                let sigs = self
+                    .rpc
+                    .send_transaction_batch_with_retries(&payloads, self.config.rpc_max_retries)
+                    .await?;
+                let mut results = vec![Ok(()); metadata.len()];
+                if sigs.len() != metadata.len() {
+                    // The batch response may omit failed items. Mark missing
+                    // probes as send failures rather than pretending success.
+                    for result in results.iter_mut().skip(sigs.len()) {
+                        *result = Err("RPC batch response omitted this transaction".to_string());
                     }
-                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Ok(results)
+            }
+        }
+    }
+
+    async fn collect_blocks(
+        &self,
+        signatures: &[String],
+        target_slot: u64,
+    ) -> Result<(Vec<DetailedBlock>, bool, String)> {
+        // Give the cluster time to include and serve the block.
+        wait_for_signatures(&self.rpc, signatures, Duration::from_secs(30)).await?;
+
+        let mut slots = BTreeMap::<u64, ()>::new();
+        slots.insert(target_slot, ());
+        for lag in 1..=self.config.max_landing_lag {
+            slots.insert(target_slot + lag, ());
+        }
+        let statuses = self.rpc.get_signature_statuses(signatures).await?;
+        for status in statuses.into_iter().flatten() {
+            if status.slot >= target_slot
+                && status.slot <= target_slot + self.config.max_landing_lag
+            {
+                slots.insert(status.slot, ());
+            }
+        }
+
+        let mut blocks = Vec::new();
+        let mut target_hash = String::new();
+        let mut target_fetched = false;
+        for slot in slots.keys().copied() {
+            match fetch_block_with_retry(&self.rpc, slot, if slot == target_slot { 30 } else { 2 })
+                .await
+            {
+                Ok(block) => {
+                    if slot == target_slot {
+                        target_fetched = true;
+                        target_hash = block.blockhash.clone();
+                    }
+                    blocks.push(block);
+                }
+                Err(e) => {
+                    if slot == target_slot {
+                        warn!("target block {} unavailable: {e:#}", slot);
+                    }
                 }
             }
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        true
+        Ok((blocks, target_fetched, target_hash))
     }
+}
 
-    pub fn print_contention_summary(results: &[ContentionBenchmarkResult]) {
-        println!("\n==========================================================================================");
-        println!(" WRITE-LOCK CONTENTION BENCHMARK SUMMARY (Sealevel Lock Serialization vs Parallel Queue)  ");
-        println!("==========================================================================================");
-        println!("{:<26} | {:<12} | {:<10} | {:<10} | {:<8} | {:<16}",
-            "Validator", "Client Fork", "Indep Idx", "Shared Idx", "Spread", "Lock Penalty");
-        println!("------------------------------------------------------------------------------------------");
-        for r in results {
-            println!("{:<26} | {:<12} | {:<10.1} | {:<10.1} | {:<+8.1} | {:<16}",
-                if r.validator_name.len() > 26 { &r.validator_name[..26] } else { &r.validator_name },
-                format!("{:?}", r.client_type),
-                r.independent_mean_index,
-                r.shared_mean_index,
-                r.lock_serialization_spread,
-                if r.lock_serialization_spread > 10.0 { "High Delay (+)" } else { "Low Delay" }
-            );
+async fn wait_for_signatures(
+    rpc: &RpcClient,
+    signatures: &[String],
+    timeout: Duration,
+) -> Result<()> {
+    let start = Instant::now();
+    let mut last_seen = 0usize;
+    while start.elapsed() < timeout {
+        match rpc.get_signature_statuses(signatures).await {
+            Ok(statuses) => {
+                let seen = statuses.iter().filter(|s| s.is_some()).count();
+                if seen > last_seen {
+                    last_seen = seen;
+                }
+                if seen == signatures.len() {
+                    return Ok(());
+                }
+            }
+            Err(e) => warn!("signature status poll failed: {e:#}"),
         }
-        println!("==========================================================================================\n");
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
+    warn!(
+        "only {}/{} signatures observed before timeout; collecting blocks that are available",
+        last_seen,
+        signatures.len()
+    );
+    Ok(())
+}
 
-    pub fn print_saturation_summary(results: &[SaturationBenchmarkResult]) {
-        println!("\n==========================================================================================");
-        println!(" QUEUE SATURATION BENCHMARK SUMMARY (Load Scaling across Burst Sizes N = 8, 16, 32)      ");
-        println!("==========================================================================================");
-        println!("{:<24} | {:<12} | {:<6} | {:<8} | {:<10} | {:<10} | {:<6}",
-            "Validator", "Client Fork", "Load N", "Landed %", "Spearman ρ", "Mean Index", "Slots");
-        println!("------------------------------------------------------------------------------------------");
-        for r in results {
-            println!("{:<24} | {:<12} | {:<6} | {:<7.1}% | {:<+10.3} | {:<10.1} | {:<6}",
-                if r.validator_name.len() > 24 { &r.validator_name[..24] } else { &r.validator_name },
-                format!("{:?}", r.client_type),
-                r.density_tier,
-                r.landing_rate_pct,
-                r.spearman_fee,
-                r.mean_index_in_block,
-                r.slot_spread
-            );
+async fn fetch_block_with_retry(
+    rpc: &RpcClient,
+    slot: u64,
+    attempts: usize,
+) -> Result<DetailedBlock> {
+    let mut last_error = None;
+    for attempt in 0..attempts {
+        match rpc.get_block(slot).await {
+            Ok(block) => return Ok(block),
+            Err(e) => {
+                last_error = Some(e);
+                if attempt + 1 < attempts {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
         }
-        println!("==========================================================================================\n");
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("block {slot} unavailable")))
+}
+
+fn simulate_block(metadata: &[CraftedTxMetadata], slot: u64, seed: u64) -> DetailedBlock {
+    let mut rng = StdRng::seed_from_u64(seed ^ slot);
+    let mut used = HashSet::new();
+    let mut transactions: Vec<_> = metadata
+        .iter()
+        .map(|meta| {
+            let mut index = 40 + rng.gen_range(0..180usize);
+            while !used.insert(index) {
+                index += 1;
+            }
+            crate::rpc::BlockTransaction {
+                signature: meta.signature.clone(),
+                index_in_block: index,
+                fee: meta.estimated_fee_lamports,
+                compute_units_consumed: Some(300),
+                err: None,
+                memo: Some(meta.memo_payload.clone()),
+                priority_fee_micro_lamports: Some(meta.priority_fee_micro_lamports),
+            }
+        })
+        .collect();
+    transactions.sort_by_key(|t| t.index_in_block);
+    let total = transactions
+        .iter()
+        .map(|t| t.index_in_block)
+        .max()
+        .unwrap_or(0)
+        + 20;
+    DetailedBlock {
+        slot,
+        blockhash: format!("synthetic-{slot}"),
+        previous_blockhash: format!("synthetic-{}", slot.saturating_sub(1)),
+        parent_slot: slot.saturating_sub(1),
+        block_time: None,
+        total_transactions: total,
+        transactions,
+    }
+}
+
+fn short_identity(identity: &str) -> &str {
+    if identity.len() >= 8 {
+        &identity[..8]
+    } else {
+        identity
+    }
+}
+
+fn now_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+#[allow(dead_code)]
+pub fn campaign_dir_for(config: &Config, campaign_id: &str) -> PathBuf {
+    let subdir = if config.live {
+        "campaigns"
+    } else {
+        "simulated"
+    };
+    config.data_dir.join(subdir).join(campaign_id)
+}
+
+#[allow(dead_code)]
+pub fn ensure_campaign_dir(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path.join(crate::campaign::RAW_BLOCKS_DIR))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solana_sdk::signature::Keypair;
+
+    #[test]
+    fn simulated_block_has_unique_indexes_and_memo() {
+        let payer = Keypair::new();
+        let metadata = TxCrafter::build_burst(
+            &payer,
+            Hash::default(),
+            "sim",
+            8,
+            BurstPattern::RandomizedFee,
+        );
+        let block = simulate_block(&metadata, 100, 42);
+        assert_eq!(block.transactions.len(), 8);
+        let mut indexes: Vec<_> = block
+            .transactions
+            .iter()
+            .map(|t| t.index_in_block)
+            .collect();
+        indexes.sort_unstable();
+        indexes.dedup();
+        assert_eq!(indexes.len(), 8);
+        assert!(block.transactions.iter().all(|t| t
+            .memo
+            .as_deref()
+            .unwrap_or("")
+            .contains(crate::tx_crafting::MEMO_PREFIX)));
     }
 }

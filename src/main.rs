@@ -1,47 +1,49 @@
 use clap::Parser;
 use solana_sdk::signature::{Keypair, Signer};
 use std::fs;
-use std::path::Path;
 use std::sync::Arc;
 use tracing::{info, warn};
 
 mod analyzer;
+mod campaign;
 mod config;
 mod experiments;
 mod leader_schedule;
+mod payer;
 mod report;
 mod rpc;
 mod server;
 mod spend_tracker;
+mod transport;
 mod tx_crafting;
 mod validator_info;
+mod verify;
 
-use analyzer::{Analyzer, BurstAnalysisResult, ValidatorAggregatedResult};
-use config::{Config, ExperimentType};
-use experiments::ExperimentEngine;
+use analyzer::{Analyzer, CampaignAnalysis, ExecutionMode, PayerMode};
+use campaign::{Campaign, CampaignMeta};
+use config::Config;
+use experiments::{campaign_dir_for, ExperimentEngine};
 use leader_schedule::LeaderScheduleManager;
+use payer::{load_keypair, load_payer_pool, PayerPool};
 use report::ReportGenerator;
 use rpc::RpcClient;
 use server::DashboardServer;
 use spend_tracker::SpendTracker;
-use validator_info::{discover_cluster_validators, ClientType, TargetValidator};
+use validator_info::{
+    discover_cluster_validators, distinct_client_classes, synthetic_fixture_validators,
+    TargetValidator,
+};
+use verify::{verify_campaign, write_verification};
 
-const WIN95_BANNER: &str = r#"
+const BANNER: &str = r#"
 ╔══════════════════════════════════════════════════════════════════════════╗
-║  ███████╗ ██████╗ ██╗      █████╗ ███╗   ██╗ █████╗     ██╗   ██╗ █████╗ ║
-║  ██╔════╝██╔═══██╗██║     ██╔══██╗████╗  ██║██╔══██╗    ██║   ██║██╔══██╗║
-║  ███████╗██║   ██║██║     ███████║██╔██╗ ██║███████║    ██║   ██║███████║║
-║  ╚════██║██║   ██║██║     ██╔══██║██║╚██╗██║██╔══██║    ██║   ██║██╔══██║║
-║  ███████║╚██████╔╝███████╗██║  ██║██║ ╚████║██║  ██║    ╚██████╔╝██║  ██║║
-║  ╚══════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝     ╚═════╝ ╚═╝  ╚═╝║
-║           SOLANA VALIDATOR TRANSACTION ORDERING ENGINE (WIN95)           ║
-║           Solana Mainnet Validator Ordering Research Pipeline            ║
+║  SOLANA VALIDATOR TRANSACTION ORDERING ENGINE v2                        ║
+║  Same-block inference · pre-window dispatch · direct TPU QUIC           ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 "#;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -49,341 +51,358 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    println!("{}", WIN95_BANNER);
-
+    println!("{BANNER}");
     let config = Config::parse();
-    info!("Initializing Validator Ordering Engine with RPC: {}", config.rpc_url);
-
-    // If --live is explicitly requested, safety check
-    let is_live = config.live;
-    if is_live {
-        warn!("LIVE MODE ACTIVE: Real transactions will be broadcast to Solana Mainnet!");
-        config.validate()?;
-    } else {
-        info!("DRY-RUN MODE ACTIVE (Safe by default): Transactions will be prepared & simulated, but NOT broadcast.");
-    }
-
+    config.validate()?;
     fs::create_dir_all(&config.data_dir)?;
     fs::create_dir_all(&config.reports_dir)?;
 
     let rpc = Arc::new(RpcClient::new(&config.rpc_url));
-    let spend_tracker = SpendTracker::new(config.spend_cap_sol);
 
-    // If analyze-only mode is selected, generate reports from existing data and optionally serve dashboard
+    if config.verify_only {
+        let campaign = load_campaign(&config)?;
+        let report = verify_campaign(&rpc, &campaign).await?;
+        let path = campaign
+            .verifier_output_path()
+            .unwrap_or_else(|| config.data_dir.join("verification.json"));
+        write_verification(&report, &path)?;
+        info!(
+            "Verification: {}/{} confirmed, {}/{} index matches, {}/{} fee matches, {} failures -> {}",
+            report.confirmed,
+            report.total_signatures,
+            report.index_matched,
+            report.total_signatures,
+            report.fee_matched,
+            report.total_signatures,
+            report.failures.len(),
+            path.display()
+        );
+        return Ok(());
+    }
+
     if config.analyze_only {
-        info!("Running in --analyze-only mode: loading raw measurement data from {:?}", config.data_dir);
-        let (results, bursts) = load_existing_data(&config.data_dir)?;
-        ReportGenerator::generate_all(&config, &results, &bursts, &spend_tracker)?;
-        info!("Analysis and reports successfully generated in {:?}", config.reports_dir);
-
+        let campaign = load_campaign(&config)?;
+        let mut analysis = Analyzer::analyze_campaign(&campaign.bursts, &config.analysis_options());
+        analysis.campaign_id = campaign.meta.campaign_id.clone();
+        enrich_analysis(&mut analysis, &campaign);
+        let spend = SpendTracker::new(config.spend_cap_sol);
+        let output = ReportGenerator::generate_all(&config, &campaign, &analysis, &spend)?;
+        info!(
+            "Analysis and reports generated: {}",
+            output.markdown.display()
+        );
+        print_summary(&campaign, &analysis);
         if config.serve_dashboard {
-            let html_path = config.reports_dir.join("dashboard.html");
-            DashboardServer::run(config.port, &html_path).await?;
+            DashboardServer::run(config.port, &output.dashboard).await?;
         }
         return Ok(());
     }
 
-    // Load or generate keypair
-    let payer = if is_live {
-        let key_path = config.keypair_path.as_ref().unwrap();
-        let key_str = fs::read_to_string(key_path)
-            .map_err(|e| anyhow::anyhow!("Could not read keypair file at {:?}: {}", key_path, e))?;
-        let kp = parse_keypair(&key_str)?;
-        info!("Loaded fee-payer keypair: {}", kp.pubkey());
-
-        let balance = rpc.get_balance(&kp.pubkey().to_string()).await.unwrap_or(0);
-        let balance_sol = balance as f64 / 1_000_000_000.0;
-        info!("Fee-payer current balance: {:.6} SOL", balance_sol);
-
-        if balance_sol < config.spend_cap_sol {
-            warn!(
-                "Payer balance ({:.6} SOL) is less than configured spend cap ({:.4} SOL)",
-                balance_sol, config.spend_cap_sol
-            );
-        }
-        kp
+    if config.is_live() {
+        warn!("LIVE MODE ACTIVE: real mainnet transactions will be broadcast.");
     } else {
-        let kp = Keypair::new();
-        info!("Dry-run ephemeral keypair initialized: {}", kp.pubkey());
-        kp
-    };
-
-    // 1. Discover target validators across at least 4 distinct client software versions
-    let mut validators = discover_cluster_validators(&rpc, &config.target_validators).await?;
-    if validators.len() > config.max_validators {
-        validators.truncate(config.max_validators);
+        info!("DRY-RUN MODE ACTIVE: transactions are simulated; nothing is broadcast.");
     }
-    info!("Identified {} target validators for investigation:", validators.len());
-    for v in &validators {
+
+    let payers = load_payers(&config, &rpc).await?;
+    let validators = load_validators(&config, &rpc).await?;
+    info!("Selected {} validators:", validators.len());
+    for validator in &validators {
         info!(
-            "  -> [{:?}] {} (ver: {}, stake: {:.0} SOL)",
-            v.client_type, v.name, v.version_string, v.stake_sol
+            "  {} [{} / {}] stake {:.0} SOL tpuQuic={}",
+            validator.identity,
+            validator.client_type,
+            validator.version_string,
+            validator.stake_sol,
+            validator.tpu_ip.as_deref().unwrap_or("none")
         );
     }
 
-    // 2. Load leader schedule
-    let schedule_mgr = LeaderScheduleManager::load(&rpc).await?;
-    let current_slot = rpc.get_slot().await.unwrap_or(465_042_000);
-    info!("Current cluster slot: {}", current_slot);
-
-    // 3. Execute requested experiment suite across target validators
-    let mut all_burst_results: Vec<BurstAnalysisResult> = Vec::new();
-    let mut aggregated_results: Vec<ValidatorAggregatedResult> = Vec::new();
-
-    let effective_exp = config.effective_experiment();
-    info!("Running Experiment Suite: {:?}", effective_exp);
-
-    match effective_exp {
-        ExperimentType::Ordering => {
-            let (agg, bursts) = ExperimentEngine::run_ordering_experiment(
-                &config,
-                &rpc,
-                &schedule_mgr,
-                &validators,
-                &payer,
-                &spend_tracker,
-                is_live,
-            ).await?;
-            aggregated_results = agg;
-            all_burst_results = bursts;
-        }
-        ExperimentType::Contention => {
-            let (contention_results, bursts) = ExperimentEngine::run_contention_experiment(
-                &config,
-                &rpc,
-                &schedule_mgr,
-                &validators,
-                &payer,
-                &spend_tracker,
-                is_live,
-            ).await?;
-            let contention_path = config.data_dir.join("contention_benchmark.json");
-            fs::write(&contention_path, serde_json::to_string_pretty(&contention_results)?)?;
-            info!("Contention benchmark data saved to {:?}", contention_path);
-
-            for validator in &validators {
-                aggregated_results.push(Analyzer::aggregate_validator(validator, &bursts));
-            }
-            all_burst_results = bursts;
-        }
-        ExperimentType::Saturation => {
-            let (sat_results, bursts) = ExperimentEngine::run_saturation_experiment(
-                &config,
-                &rpc,
-                &schedule_mgr,
-                &validators,
-                &payer,
-                &spend_tracker,
-                is_live,
-            ).await?;
-            let sat_path = config.data_dir.join("saturation_benchmark.json");
-            fs::write(&sat_path, serde_json::to_string_pretty(&sat_results)?)?;
-            info!("Saturation benchmark data saved to {:?}", sat_path);
-
-            for validator in &validators {
-                aggregated_results.push(Analyzer::aggregate_validator(validator, &bursts));
-            }
-            all_burst_results = bursts;
-        }
-        ExperimentType::All => {
-            info!("Executing ALL experiment suites sequentially: Ordering -> Contention -> Saturation");
-            let (agg, ord_bursts) = ExperimentEngine::run_ordering_experiment(
-                &config,
-                &rpc,
-                &schedule_mgr,
-                &validators,
-                &payer,
-                &spend_tracker,
-                is_live,
-            ).await?;
-            aggregated_results = agg;
-            all_burst_results.extend(ord_bursts);
-
-            let (contention_results, cont_bursts) = ExperimentEngine::run_contention_experiment(
-                &config,
-                &rpc,
-                &schedule_mgr,
-                &validators,
-                &payer,
-                &spend_tracker,
-                is_live,
-            ).await?;
-            let contention_path = config.data_dir.join("contention_benchmark.json");
-            fs::write(&contention_path, serde_json::to_string_pretty(&contention_results)?)?;
-            all_burst_results.extend(cont_bursts);
-
-            let (sat_results, sat_bursts) = ExperimentEngine::run_saturation_experiment(
-                &config,
-                &rpc,
-                &schedule_mgr,
-                &validators,
-                &payer,
-                &spend_tracker,
-                is_live,
-            ).await?;
-            let sat_path = config.data_dir.join("saturation_benchmark.json");
-            fs::write(&sat_path, serde_json::to_string_pretty(&sat_results)?)?;
-            all_burst_results.extend(sat_bursts);
-        }
-    }
-
-    // 4. Save raw JSON data
-    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-    let raw_data_path = config.data_dir.join(format!("measurements_{}.json", timestamp));
-    let analysis_path = config.data_dir.join(format!("analysis_{}.json", timestamp));
-
-    fs::write(&raw_data_path, serde_json::to_string_pretty(&all_burst_results)?)?;
-    fs::write(&analysis_path, serde_json::to_string_pretty(&aggregated_results)?)?;
-
-    // In live mode or if canonical files don't exist yet, save as default measurements.json
-    let default_raw = config.data_dir.join("measurements.json");
-    let default_analysis = config.data_dir.join("analysis.json");
-    if is_live || !default_raw.exists() {
-        fs::write(&default_raw, serde_json::to_string_pretty(&all_burst_results)?)?;
-        fs::write(&default_analysis, serde_json::to_string_pretty(&aggregated_results)?)?;
+    let schedule = if config.is_live() {
+        LeaderScheduleManager::load(&rpc, false).await?
     } else {
-        let sim_raw = config.data_dir.join("measurements_simulated.json");
-        fs::write(&sim_raw, serde_json::to_string_pretty(&all_burst_results)?)?;
-        info!("Dry-run data saved to {:?} (canonical measurements.json preserved)", sim_raw);
+        let identities: Vec<String> = validators.iter().map(|v| v.identity.clone()).collect();
+        LeaderScheduleManager::synthetic_for(&identities, 465_000_000)
+    };
+
+    let campaign_id = campaign::campaign_id_now(if config.is_live() { "live" } else { "dryrun" });
+    let campaign_dir = campaign_dir_for(&config, &campaign_id);
+    fs::create_dir_all(&campaign_dir)?;
+    // Live spend is journaled globally so a restart cannot reset the cap.
+    // Dry-run spend is isolated inside the clearly-labelled simulated campaign.
+    let spend_journal = if config.is_live() {
+        config.data_dir.join("live").join("spend_journal.jsonl")
+    } else {
+        campaign_dir.join("spend_journal.jsonl")
+    };
+    let spend = SpendTracker::with_journal(config.spend_cap_sol, &spend_journal)?;
+
+    let mut engine = ExperimentEngine::new(
+        config.clone(),
+        (*rpc).clone(),
+        schedule,
+        spend.clone(),
+        payers,
+        campaign_dir.clone(),
+    );
+    let output = engine.run(&validators).await?;
+    if output.bursts.is_empty() {
+        anyhow::bail!("campaign produced no bursts; refusing to write an empty report");
     }
 
-    info!("Raw measurement data saved to {:?}", raw_data_path);
-    info!("Aggregated analysis data saved to {:?}", analysis_path);
+    let mut meta = CampaignMeta::new(
+        campaign_id.clone(),
+        if config.is_live() {
+            ExecutionMode::Live
+        } else {
+            ExecutionMode::DryRun
+        },
+        config.rpc_url.clone(),
+    );
+    meta.transport = config.transport_kind();
+    meta.payer_mode = config.payer_mode_kind();
+    meta.send_lead_slots = config.send_lead_slots;
+    meta.target_window_slots = config.target_window_slots;
+    meta.burst_size = config.burst_size;
+    meta.repetitions = config.repetitions;
+    meta.patterns = config.burst_patterns();
+    meta.seed = config.seed;
+    meta.min_blocks = config.min_blocks;
+    meta.permutation_trials = config.permutation_trials;
+    meta.spend_cap_lamports = config.spend_cap_lamports();
+    meta.total_bursts = output.bursts.len();
+    meta.total_tx_sent = output.total_tx_sent;
+    meta.total_tx_landed = output.total_tx_landed;
+    meta.total_spent_lamports = spend.campaign_spent_lamports();
+    meta.validators = validators.clone();
+    meta.notes.push(format!(
+        "Pre-window send lead: {} slots; target window: {} slot(s); primary inference uses the target block only.",
+        config.send_lead_slots, config.target_window_slots
+    ));
+    if output.failed_tasks > 0 {
+        meta.notes.push(format!(
+            "{} task(s) failed before dispatch or were skipped as late.",
+            output.failed_tasks
+        ));
+    }
+    if !config.is_live() {
+        meta.notes.push(
+            "Dry-run: all block placements are synthetic. This report validates the pipeline only and \
+             must not be cited as validator behaviour."
+                .to_string(),
+        );
+    }
 
-    // 5. Generate Markdown report and Windows 95 HTML Dashboard
-    ReportGenerator::generate_all(&config, &aggregated_results, &all_burst_results, &spend_tracker)?;
+    let mut campaign = Campaign::new(meta, output.bursts);
+    let saved_dir = campaign.save(&campaign_dir)?;
+    campaign.dir = Some(saved_dir);
+    info!("Campaign saved to {}", campaign_dir.display());
 
-    // 6. Print CLI summary
-    print_cli_summary(&aggregated_results, &spend_tracker);
+    if config.is_live() && config.verify {
+        let report = verify_campaign(&rpc, &campaign).await?;
+        let path = campaign
+            .verifier_output_path()
+            .unwrap_or_else(|| campaign_dir.join("verification.json"));
+        write_verification(&report, &path)?;
+        info!(
+            "Verification: {} confirmed, {} failures -> {}",
+            report.confirmed,
+            report.failures.len(),
+            path.display()
+        );
+    }
 
-    // 7. Serve dashboard if requested
+    let mut analysis = Analyzer::analyze_campaign(&campaign.bursts, &config.analysis_options());
+    analysis.campaign_id = campaign.meta.campaign_id.clone();
+    enrich_analysis(&mut analysis, &campaign);
+    let report_output = ReportGenerator::generate_all(&config, &campaign, &analysis, &spend)?;
+    info!("Report: {}", report_output.markdown.display());
+    info!("Analysis JSON: {}", report_output.analysis_json.display());
+    print_summary(&campaign, &analysis);
+
     if config.serve_dashboard {
-        let html_path = config.reports_dir.join("dashboard.html");
-        DashboardServer::run(config.port, &html_path).await?;
+        DashboardServer::run(config.port, &report_output.dashboard).await?;
     }
-
     Ok(())
 }
 
-/// Helper function to load raw measurements from disk
-fn load_existing_data(
-    data_dir: &Path,
-) -> anyhow::Result<(Vec<ValidatorAggregatedResult>, Vec<BurstAnalysisResult>)> {
-    let analysis_path = data_dir.join("analysis.json");
-    let raw_path = data_dir.join("measurements.json");
-
-    if analysis_path.exists() && raw_path.exists() {
-        let content_analysis = fs::read_to_string(&analysis_path)?;
-        let aggregated: Vec<ValidatorAggregatedResult> = serde_json::from_str(&content_analysis)?;
-
-        let content_raw = fs::read_to_string(&raw_path)?;
-        let bursts: Vec<BurstAnalysisResult> = serde_json::from_str(&content_raw)?;
-
-        return Ok((aggregated, bursts));
-    }
-
-    if raw_path.exists() {
-        let content = fs::read_to_string(&raw_path)?;
-        let bursts: Vec<BurstAnalysisResult> = serde_json::from_str(&content)?;
-
-        // Collect unique validators
-        let mut val_map = std::collections::HashMap::new();
-        for b in &bursts {
-            val_map.insert(
-                b.target_validator_identity.clone(),
-                TargetValidator {
-                    identity: b.target_validator_identity.clone(),
-                    name: format!("Validator {}", &b.target_validator_identity[..8]),
-                    client_type: b.validator_client_type,
-                    version_string: match b.validator_client_type {
-                        ClientType::Agave => "4.4.0".to_string(),
-                        ClientType::JitoSolana => "4.4.0-jito".to_string(),
-                        ClientType::Firedancer => "26.10.5".to_string(),
-                        ClientType::AgaveBam => "4.4.0-bam".to_string(),
-                        _ => "1.18.25".to_string(),
-                    },
-                    stake_sol: 2_500_000.0,
-                    tpu_ip: None,
-                },
-            );
+async fn load_payers(config: &Config, rpc: &RpcClient) -> anyhow::Result<PayerPool> {
+    if config.is_live() {
+        match config.payer_mode_kind() {
+            PayerMode::Shared => {
+                let path = config.keypair_path.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("--keypair-path is required for shared live mode")
+                })?;
+                let payer = load_keypair(path)?;
+                let balance = rpc.get_balance(&payer.pubkey().to_string()).await?;
+                info!(
+                    "Shared payer {} balance {:.6} SOL",
+                    payer.pubkey(),
+                    balance as f64 / 1_000_000_000.0
+                );
+                if balance < config.spend_cap_lamports() / 2 {
+                    warn!(
+                        "Payer balance {:.6} SOL is below half the configured cap {:.6} SOL",
+                        balance as f64 / 1_000_000_000.0,
+                        config.spend_cap_sol
+                    );
+                }
+                Ok(PayerPool::new(Some(payer), Vec::new()))
+            }
+            PayerMode::Independent => {
+                let path = config.payer_pool_file.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("--payer-pool-file is required for independent live mode")
+                })?;
+                let payers = load_payer_pool(path)?;
+                if payers.len() < config.burst_size {
+                    anyhow::bail!(
+                        "payer pool has {} keys but --burst-size is {}; provide at least {} independent funded payers",
+                        payers.len(),
+                        config.burst_size,
+                        config.burst_size
+                    );
+                }
+                for payer in payers.iter().take(config.burst_size) {
+                    let balance = rpc.get_balance(&payer.pubkey().to_string()).await?;
+                    if balance < 1_000_000 {
+                        anyhow::bail!(
+                            "independent payer {} has {} lamports; fund it before a live campaign",
+                            payer.pubkey(),
+                            balance
+                        );
+                    }
+                }
+                info!(
+                    "Loaded {} independent payers; each has at least 0.001 SOL",
+                    payers.len()
+                );
+                Ok(PayerPool::new(None, payers))
+            }
         }
-
-        let mut aggregated = Vec::new();
-        for (_, val) in val_map {
-            aggregated.push(Analyzer::aggregate_validator(&val, &bursts));
+    } else {
+        let master = Keypair::new();
+        info!("Dry-run ephemeral payer: {}", master.pubkey());
+        if config.payer_mode_kind() == PayerMode::Independent {
+            let payers: Vec<Keypair> = (0..config.burst_size).map(|_| Keypair::new()).collect();
+            Ok(PayerPool::new(Some(master), payers))
+        } else {
+            Ok(PayerPool::new(Some(master), Vec::new()))
         }
-
-        return Ok((aggregated, bursts));
     }
-
-    anyhow::bail!("No measurements.json found in {:?}", data_dir)
 }
 
+async fn load_validators(config: &Config, rpc: &RpcClient) -> anyhow::Result<Vec<TargetValidator>> {
+    if !config.is_live() {
+        let mut validators = synthetic_fixture_validators();
+        validators.truncate(config.max_validators);
+        return Ok(validators);
+    }
 
-
-fn print_cli_summary(results: &[ValidatorAggregatedResult], tracker: &SpendTracker) {
-    println!("\n==========================================================================================");
-    println!("                   SOLANA VALIDATOR TRANSACTION ORDERING FINAL RESULTS                    ");
-    println!("==========================================================================================");
-    println!(
-        "{:<20} | {:<16} | {:<8} | {:<10} | {:<14} | {:<10}",
-        "Validator", "Client Fork", "Version", "Landing %", "Spearman ρ_fee", "Strictness"
-    );
-    println!("------------------------------------------------------------------------------------------");
-
-    for r in results {
-        println!(
-            "{:<20} | {:<16} | {:<8} | {:<9.1}% | {:<+14.3} | {:<9.0}%",
-            &r.validator_name[..20.min(r.validator_name.len())],
-            format!("{}", r.client_type),
-            r.version_string,
-            r.overall_landing_rate_pct,
-            r.avg_spearman_fee,
-            r.rule_strictness_score * 100.0
+    let require_tpu = config.transport_kind() == analyzer::TransportKind::TpuQuic;
+    let mut validators = discover_cluster_validators(
+        rpc,
+        &config.target_validators,
+        config.max_validators,
+        require_tpu,
+    )
+    .await?;
+    validators.truncate(config.max_validators);
+    let classes = distinct_client_classes(&validators);
+    if validators.len() < config.min_validators && !config.allow_few_validators {
+        anyhow::bail!(
+            "live campaign has {} validators but --min-validators is {}; pass --allow-few-validators only for a pilot",
+            validators.len(),
+            config.min_validators
         );
     }
-    println!("------------------------------------------------------------------------------------------");
-    println!(
-        "Spend Cap Audit: Total Spent: {:.6} SOL / Cap: {:.4} SOL ({:.1}% used) - Status: COMPLIANT",
-        tracker.current_spent_sol(),
-        tracker.cap_sol(),
-        (tracker.current_spent_sol() / tracker.cap_sol()) * 100.0
-    );
-    println!("==========================================================================================\n");
+    if classes < config.min_client_versions && !config.allow_few_validators {
+        anyhow::bail!(
+            "live campaign spans {} client/version classes but --min-client-versions is {}",
+            classes,
+            config.min_client_versions
+        );
+    }
+    Ok(validators)
 }
 
-/// Robust keypair parser accepting either a JSON byte array [1,2,3...] or a Base58 private key string
-fn parse_keypair(key_str: &str) -> anyhow::Result<Keypair> {
-    let trimmed = key_str.trim();
-
-    // 1. Try JSON byte array: [1, 2, 3, ...]
-    if trimmed.starts_with('[') && trimmed.ends_with(']') {
-        if let Ok(bytes) = serde_json::from_str::<Vec<u8>>(trimmed) {
-            if bytes.len() == 64 {
-                if let Ok(kp) = Keypair::try_from(&bytes[..]) {
-                    return Ok(kp);
-                }
-            } else if bytes.len() == 32 {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
-                return Ok(Keypair::new_from_array(arr));
+fn load_campaign(config: &Config) -> anyhow::Result<Campaign> {
+    if let Some(dir) = &config.campaign_dir {
+        if dir.is_file() {
+            let mut campaign = Campaign::load_legacy(dir)?;
+            campaign.dir = dir.parent().map(|p| p.to_path_buf());
+            return Ok(campaign);
+        }
+        if dir.join("measurements.json").exists() && !dir.join("campaign.json").exists() {
+            let mut campaign = Campaign::load_legacy(&dir.join("measurements.json"))?;
+            campaign.dir = Some(dir.clone());
+            return Ok(campaign);
+        }
+        return Campaign::load(dir);
+    }
+    match Campaign::load_latest(&config.data_dir) {
+        Ok(campaign) => Ok(campaign),
+        Err(latest_error) => {
+            let legacy = config.data_dir.join("measurements.json");
+            if legacy.exists() {
+                warn!("No v2 campaign found; loading legacy measurements.json");
+                let mut campaign = Campaign::load_legacy(&legacy)?;
+                campaign.dir = Some(config.data_dir.clone());
+                Ok(campaign)
+            } else {
+                Err(latest_error)
             }
         }
     }
+}
 
-    // 2. Try Base58 private key string (from Phantom, Backpack, Solflare)
-    let clean_b58 = trimmed.trim_matches('"').trim();
-    if let Ok(bytes) = bs58::decode(clean_b58).into_vec() {
-        if bytes.len() == 64 {
-            if let Ok(kp) = Keypair::try_from(&bytes[..]) {
-                return Ok(kp);
-            }
-        } else if bytes.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&bytes);
-            return Ok(Keypair::new_from_array(arr));
+fn enrich_analysis(analysis: &mut CampaignAnalysis, campaign: &Campaign) {
+    for validator in &mut analysis.per_validator {
+        if let Some(meta) = campaign
+            .meta
+            .validators
+            .iter()
+            .find(|v| v.identity == validator.validator_identity)
+        {
+            validator.validator_name = meta.name.clone();
+            validator.client_type = meta.client_type;
+            validator.version_string = meta.version_string.clone();
+            validator.stake_sol = meta.stake_sol;
         }
     }
+}
 
-    anyhow::bail!("Invalid keypair format. Provide either a 64-byte JSON array [1,2,3...] or a Base58 private key string.")
+fn print_summary(campaign: &Campaign, analysis: &CampaignAnalysis) {
+    println!(
+        "\n=== Campaign {} ({}) ===",
+        campaign.meta.campaign_id, campaign.meta.execution_mode
+    );
+    println!(
+        "Probes: {} landed / {} sent; target-block probes: {}; target-window probes: {}",
+        analysis.sample.total_probes_landed,
+        analysis.sample.total_probes_sent,
+        analysis.sample.target_block_probes,
+        analysis.sample.target_window_probes
+    );
+    println!(
+        "Target-block fee: {} | p={:?} | blocks={} | verdict: {}",
+        analysis.fee_target_block.effect_text(),
+        analysis.fee_target_block.permutation_p,
+        analysis.fee_target_block.blocks_used,
+        analysis.fee_target_block.verdict
+    );
+    println!(
+        "Target-block send order: {} | p={:?} | blocks={} | verdict: {}",
+        analysis.send_target_block.effect_text(),
+        analysis.send_target_block.permutation_p,
+        analysis.send_target_block.blocks_used,
+        analysis.send_target_block.verdict
+    );
+    for warning in &analysis.warnings {
+        println!("WARNING: {warning}");
+    }
+    println!(
+        "Spend: {:.9} SOL of {:.9} SOL cap",
+        campaign.meta.total_spent_lamports as f64 / 1_000_000_000.0,
+        campaign.meta.spend_cap_lamports as f64 / 1_000_000_000.0
+    );
 }

@@ -1,0 +1,47 @@
+{
+  "generated_at_utc": "2026-11-13T08:35:42.208662600+00:00",
+  "campaign_id": "legacy-v1",
+  "execution_mode": "legacy",
+  "total_signatures": 216,
+  "unique_signatures": 216,
+  "confirmed": 216,
+  "rpc_errors": 0,
+  "slot_matched": 216,
+  "index_matched": 216,
+  "fee_matched": 216,
+  "memo_present": 216,
+  "target_block_members": 0,
+  "target_blocks_available": 27,
+  "target_blocks_checked": 27,
+  "landed_blocks_available": 116,
+  "landed_blocks_checked": 116,
+  "leaders_checked": 27,
+  "leaders_matched": 24,
+  "tx_errors": 216,
+  "failures": [
+    {
+      "burst_id": "EkvdKh-465709388-p0",
+      "signature": null,
+      "kind": "leader_mismatch",
+      "expected": "EkvdKhULRvdZq4E3yqj945rXw1yE8s1V8k4e7d5N5e8",
+      "actual": "target slot 465709388 is not in the validator's leader schedule (epoch index 13388)"
+    },
+    {
+      "burst_id": "EkvdKh-465709424-p1",
+      "signature": null,
+      "kind": "leader_mismatch",
+      "expected": "EkvdKhULRvdZq4E3yqj945rXw1yE8s1V8k4e7d5N5e8",
+      "actual": "target slot 465709424 is not in the validator's leader schedule (epoch index 13424)"
+    },
+    {
+      "burst_id": "EkvdKh-465709780-p2",
+      "signature": null,
+      "kind": "leader_mismatch",
+      "expected": "EkvdKhULRvdZq4E3yqj945rXw1yE8s1V8k4e7d5N5e8",
+      "actual": "target slot 465709780 is not in the validator's leader schedule (epoch index 13780)"
+    }
+  ],
+  "notes": [
+    "Fetched 116/116 unique blocks covering target slots and probe landing slots."
+  ]
+}

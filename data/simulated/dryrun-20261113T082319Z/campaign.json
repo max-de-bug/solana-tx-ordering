@@ -1,0 +1,100 @@
+{
+  "campaign_id": "dryrun-20261113T082319Z",
+  "created_at_utc": "2026-11-13T08:23:20.014157400+00:00",
+  "finished_at_utc": null,
+  "execution_mode": "DryRun",
+  "design_version": 2,
+  "rpc_url": "https://api.mainnet-beta.solana.com",
+  "transport": "TpuQuic",
+  "payer_mode": "Shared",
+  "send_lead_slots": 2,
+  "target_window_slots": 4,
+  "burst_size": 8,
+  "repetitions": 1,
+  "patterns": [
+    "AscendingFee",
+    "DescendingFee",
+    "AlternatingFee",
+    "UniformFee",
+    "RandomizedFee"
+  ],
+  "seed": 42,
+  "min_blocks": 3,
+  "permutation_trials": 200,
+  "spend_cap_lamports": 50000000,
+  "total_bursts": 40,
+  "total_tx_sent": 320,
+  "total_tx_landed": 320,
+  "total_spent_lamports": 5565728,
+  "memo_prefix": "solana-tx-order:v2",
+  "validators": [
+    {
+      "identity": "17EtdeMwcxWvuEN3yCfYAowtnyHhRSRxhuhAeTEEhZa",
+      "name": "Synthetic Agave (Anza) fixture 1",
+      "client_type": "Agave",
+      "version_string": "synthetic-Agave (Anza)",
+      "stake_sol": 0.0,
+      "tpu_ip": null
+    },
+    {
+      "identity": "29jGKkZXzh1NJSUzU3kHV3vv3VYi9W7NTeErA7DQwN3b",
+      "name": "Synthetic Agave (Anza) fixture 2",
+      "client_type": "Agave",
+      "version_string": "synthetic-Agave (Anza)",
+      "stake_sol": 0.0,
+      "tpu_ip": null
+    },
+    {
+      "identity": "36bQKy5gGsAYFhz6aEK9ZJjbTiVXaPirHMa2yRqoQ2ZV",
+      "name": "Synthetic Jito-Solana fixture 1",
+      "client_type": "JitoSolana",
+      "version_string": "synthetic-Jito-Solana",
+      "stake_sol": 0.0,
+      "tpu_ip": null
+    },
+    {
+      "identity": "4FDRm5zrKwDPdFEizJrmWBrZcR4x2UPnnHuBxtbz6MVA",
+      "name": "Synthetic Jito-Solana fixture 2",
+      "client_type": "JitoSolana",
+      "version_string": "synthetic-Jito-Solana",
+      "stake_sol": 0.0,
+      "tpu_ip": null
+    },
+    {
+      "identity": "5C5ZmJWzc7NZaWjq6VRdaSfF2e1mTN1Gc1ENnD7oYCaS",
+      "name": "Synthetic Firedancer (Jump Crypto) fixture 1",
+      "client_type": "Firedancer",
+      "version_string": "synthetic-Firedancer (Jump Crypto)",
+      "stake_sol": 0.0,
+      "tpu_ip": null
+    },
+    {
+      "identity": "6LhbCRSAfBRQx3zTWZyFXKnDBLbBuSgD6wZVZh8LLTNw",
+      "name": "Synthetic Firedancer (Jump Crypto) fixture 2",
+      "client_type": "Firedancer",
+      "version_string": "synthetic-Firedancer (Jump Crypto)",
+      "stake_sol": 0.0,
+      "tpu_ip": null
+    },
+    {
+      "identity": "7HZjCdxJwMaauKVZckY7baatbZY1LLHguuuTWSJH2r8u",
+      "name": "Synthetic Agave-BAM fixture 1",
+      "client_type": "AgaveBam",
+      "version_string": "synthetic-Agave-BAM",
+      "stake_sol": 0.0,
+      "tpu_ip": null
+    },
+    {
+      "identity": "8SBkdksUzRdSGrkC2q5jYThrkG7RmKEFwUUJ3mAQg1AN",
+      "name": "Synthetic Agave-BAM fixture 2",
+      "client_type": "AgaveBam",
+      "version_string": "synthetic-Agave-BAM",
+      "stake_sol": 0.0,
+      "tpu_ip": null
+    }
+  ],
+  "notes": [
+    "Pre-window send lead: 2 slots; target window: 4 slot(s); primary inference uses the target block only.",
+    "Dry-run: all block placements are synthetic. This report validates the pipeline only and must not be cited as validator behaviour."
+  ]
+}

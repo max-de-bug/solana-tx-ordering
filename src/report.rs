@@ -1,1185 +1,914 @@
-use crate::analyzer::{BurstAnalysisResult, ContentionBenchmarkResult, ValidatorAggregatedResult};
+use crate::analyzer::{CampaignAnalysis, SameBlockStats, ValidatorSameBlock};
+use crate::campaign::Campaign;
 use crate::config::Config;
-use crate::experiments::SaturationBenchmarkResult;
 use crate::spend_tracker::SpendTracker;
-use chrono::Utc;
+use crate::tx_crafting::BurstPattern;
+use crate::verify::VerificationReport;
+use anyhow::{Context, Result};
+use serde::Serialize;
 use std::fs;
-use tracing::info;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone)]
+pub struct ReportOutput {
+    pub markdown: PathBuf,
+    pub dashboard: PathBuf,
+    pub analysis_json: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+struct ReportBundle<'a> {
+    campaign: &'a crate::campaign::CampaignMeta,
+    analysis: &'a CampaignAnalysis,
+    verification: Option<&'a VerificationReport>,
+    spend: crate::spend_tracker::SpendSummary,
+}
 
 pub struct ReportGenerator;
 
 impl ReportGenerator {
     pub fn generate_all(
         config: &Config,
-        results: &[ValidatorAggregatedResult],
-        all_bursts: &[BurstAnalysisResult],
-        tracker: &SpendTracker,
-    ) -> anyhow::Result<()> {
-        fs::create_dir_all(&config.reports_dir)?;
-        fs::create_dir_all(&config.data_dir)?;
+        campaign: &Campaign,
+        analysis: &CampaignAnalysis,
+        spend: &SpendTracker,
+    ) -> Result<ReportOutput> {
+        let out_dir = output_dir(config, campaign);
+        fs::create_dir_all(&out_dir)
+            .with_context(|| format!("create report directory {}", out_dir.display()))?;
 
-        let contention_path = config.data_dir.join("contention_benchmark.json");
-        let contention_data: Vec<ContentionBenchmarkResult> = if contention_path.exists() {
-            fs::read_to_string(&contention_path)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
+        let verification = load_verification(config, campaign);
+        let spend_summary = spend.summary();
+        let markdown = render_markdown(campaign, analysis, verification.as_ref(), &spend_summary);
+        let dashboard = render_html(campaign, analysis, verification.as_ref(), &spend_summary);
+
+        let markdown_path = out_dir.join("REPORT.md");
+        let dashboard_path = out_dir.join("dashboard.html");
+        let index_path = out_dir.join("index.html");
+        let analysis_path = out_dir.join("analysis.json");
+
+        fs::write(&markdown_path, markdown)?;
+        fs::write(&dashboard_path, dashboard.clone())?;
+        fs::write(&index_path, dashboard)?;
+        let bundle = ReportBundle {
+            campaign: &campaign.meta,
+            analysis,
+            verification: verification.as_ref(),
+            spend: spend_summary,
         };
+        fs::write(&analysis_path, serde_json::to_string_pretty(&bundle)?)?;
 
-        let sat_path = config.data_dir.join("saturation_benchmark.json");
-        let saturation_data: Vec<SaturationBenchmarkResult> = if sat_path.exists() {
-            fs::read_to_string(&sat_path)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        Ok(ReportOutput {
+            markdown: markdown_path,
+            dashboard: dashboard_path,
+            analysis_json: analysis_path,
+        })
+    }
+}
 
-        // Automatically trigger Gnuplot figure generation
-        let py_script = std::path::Path::new("scripts/generate_plots.py");
-        if py_script.exists() {
-            info!("Generating scientific Gnuplot figures via scripts/generate_plots.py...");
-            let status = std::process::Command::new("python")
-                .arg("scripts/generate_plots.py")
-                .status();
-            match status {
-                Ok(s) if s.success() => info!("Gnuplot figures generated successfully in reports/figures/"),
-                _ => {
-                    // Try direct gnuplot execution if python is not in path
-                    let gp_script = std::path::Path::new("reports/figures/generate_figures.gp");
-                    if gp_script.exists() {
-                        let _ = std::process::Command::new("gnuplot").arg(gp_script).status();
-                    }
-                }
+fn output_dir(config: &Config, campaign: &Campaign) -> PathBuf {
+    match campaign.meta.execution_mode {
+        crate::analyzer::ExecutionMode::DryRun => config
+            .reports_dir
+            .join("simulated")
+            .join(&campaign.meta.campaign_id),
+        crate::analyzer::ExecutionMode::Legacy => config.reports_dir.join("legacy-v1"),
+        crate::analyzer::ExecutionMode::Live => config
+            .reports_dir
+            .join("live")
+            .join(&campaign.meta.campaign_id),
+        crate::analyzer::ExecutionMode::Mixed => config
+            .reports_dir
+            .join("mixed")
+            .join(&campaign.meta.campaign_id),
+    }
+}
+
+fn load_verification(config: &Config, campaign: &Campaign) -> Option<VerificationReport> {
+    let candidates = [
+        campaign.dir.as_ref().map(|d| d.join("verification.json")),
+        Some(config.data_dir.join("verification.json")),
+        Some(config.data_dir.join("verification_legacy.json")),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        if let Ok(raw) = fs::read_to_string(&candidate) {
+            if let Ok(report) = serde_json::from_str::<VerificationReport>(&raw) {
+                return Some(report);
             }
         }
-
-        info!("Generating comprehensive Markdown report...");
-        let md_report = Self::generate_markdown(results, all_bursts, tracker, config, &contention_data, &saturation_data);
-        let md_path = config.reports_dir.join("REPORT.md");
-        fs::write(&md_path, md_report)?;
-        info!("Saved report to {:?}", md_path);
-
-        info!("Generating Windows 95 interactive HTML dashboard...");
-        let html_dashboard = Self::generate_html_dashboard(results, all_bursts, tracker, &contention_data, &saturation_data);
-        let html_path = config.reports_dir.join("dashboard.html");
-        fs::write(&html_path, &html_dashboard)?;
-        let index_path = config.reports_dir.join("index.html");
-        fs::write(&index_path, html_dashboard)?;
-        info!("Saved interactive dashboard to {:?}", html_path);
-
-        Ok(())
     }
+    None
+}
 
-    pub fn generate_markdown(
-        results: &[ValidatorAggregatedResult],
-        all_bursts: &[BurstAnalysisResult],
-        tracker: &SpendTracker,
-        config: &Config,
-        contention_data: &[ContentionBenchmarkResult],
-        saturation_data: &[SaturationBenchmarkResult],
-    ) -> String {
-        let now_str = Utc::now().to_rfc3339();
-        let total_tx_sent: usize = results.iter().map(|r| r.total_tx_sent).sum();
-        let total_tx_landed: usize = results.iter().map(|r| r.total_tx_landed).sum();
-        let overall_rate = if total_tx_sent > 0 {
-            (total_tx_landed as f64 / total_tx_sent as f64) * 100.0
+fn render_markdown(
+    campaign: &Campaign,
+    analysis: &CampaignAnalysis,
+    verification: Option<&VerificationReport>,
+    spend: &crate::spend_tracker::SpendSummary,
+) -> String {
+    let mode = campaign.meta.execution_mode;
+    let mut md = String::new();
+    md.push_str("# Solana Transaction Ordering: Same-Block Campaign Report\n\n");
+    md.push_str(&format!(
+        "> **Campaign:** `{}`  \n> **Mode:** `{}`  \n> **Design version:** {}  \n> **Generated:** {}  \n> **Measured:** {} → {}\n\n",
+        campaign.meta.campaign_id,
+        mode,
+        campaign.meta.design_version,
+        analysis.generated_at_utc,
+        campaign.meta.created_at_utc,
+        campaign.meta.finished_at_utc.as_deref().unwrap_or("(not finished)"),
+    ));
+
+    md.push_str(&status_banner(campaign, analysis));
+    md.push_str("\n## 1. What this report can and cannot establish\n\n");
+    md.push_str(
+        "The primary inferential unit is a **block**, not a transaction. A probe is used only if it \
+         landed in the validator's target block. Probes from different blocks are never correlated. \
+         This is the main correction over the v1 report, which pooled cross-block placements and \
+         therefore could not support its stated conclusions.\n\n",
+    );
+    md.push_str(
+        "The headline test is a **block-clustered, tie-aware permutation test**: fee labels (or send \
+         positions) are shuffled within each block, the mean within-block Kendall τb is recomputed, \
+         and the observed statistic is compared with the null distribution. A 95% interval comes from \
+         bootstrapping whole blocks. The exact sign test over block-level τ values is reported as a \
+         low-power cross-check. No per-burst p-value is interpreted as significance.\n\n",
+    );
+
+    md.push_str("## 2. Provenance and measurement dates\n\n");
+    md.push_str("| Field | Value |\n|---|---|\n");
+    md.push_str(&format!(
+        "| Campaign ID | `{}` |\n",
+        campaign.meta.campaign_id
+    ));
+    md.push_str(&format!("| Execution mode | `{}` |\n", mode));
+    md.push_str(&format!(
+        "| Measurement started (UTC) | `{}` |\n",
+        campaign.meta.created_at_utc
+    ));
+    md.push_str(&format!(
+        "| Measurement finished (UTC) | `{}` |\n",
+        campaign
+            .meta
+            .finished_at_utc
+            .as_deref()
+            .unwrap_or("not recorded")
+    ));
+    md.push_str(&format!("| RPC endpoint | `{}` |\n", campaign.meta.rpc_url));
+    md.push_str(&format!("| Transport | `{}` |\n", campaign.meta.transport));
+    md.push_str(&format!(
+        "| Payer mode | `{}` |\n",
+        campaign.meta.payer_mode
+    ));
+    md.push_str(&format!(
+        "| Send lead | {} slot(s) before target window |\n",
+        campaign.meta.send_lead_slots
+    ));
+    md.push_str(&format!(
+        "| Target window | {} slot(s) |\n",
+        campaign.meta.target_window_slots
+    ));
+    md.push_str(&format!(
+        "| Burst size | {} probes |\n",
+        campaign.meta.burst_size
+    ));
+    md.push_str(&format!(
+        "| Repetitions | {} per validator/pattern |\n",
+        campaign.meta.repetitions
+    ));
+    md.push_str(&format!(
+        "| Patterns | {} |\n",
+        campaign
+            .meta
+            .patterns
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    md.push_str(&format!("| Seed | `{}` |\n", campaign.meta.seed));
+    md.push_str(&format!(
+        "| Memo prefix | `{}` |\n",
+        campaign.meta.memo_prefix
+    ));
+    md.push_str(&format!(
+        "| Spend | {:.9} / {:.9} SOL cap |\n\n",
+        campaign.meta.total_spent_lamports as f64 / 1_000_000_000.0,
+        campaign.meta.spend_cap_lamports as f64 / 1_000_000_000.0
+    ));
+
+    md.push_str("### Validator roster actually used\n\n");
+    md.push_str(
+        "| Identity | Client | Version | Stake (SOL) | tpuQuic |\n|---|---|---:|---:|---|\n",
+    );
+    for validator in &campaign.meta.validators {
+        md.push_str(&format!(
+            "| `{}` | {} | `{}` | {:.0} | `{}` |\n",
+            validator.identity,
+            validator.client_type,
+            validator.version_string,
+            validator.stake_sol,
+            validator.tpu_ip.as_deref().unwrap_or("none")
+        ));
+    }
+    md.push('\n');
+
+    md.push_str("## 3. Sample accounting\n\n");
+    md.push_str("| Quantity | Count |\n|---|---:|\n");
+    md.push_str(&format!(
+        "| Bursts attempted | {} |\n",
+        analysis.sample.total_bursts
+    ));
+    md.push_str(&format!(
+        "| Bursts with target-block probes | {} |\n",
+        analysis.sample.bursts_with_target_block_probes
+    ));
+    md.push_str(&format!(
+        "| Bursts with target-window probes | {} |\n",
+        analysis.sample.bursts_with_target_window_probes
+    ));
+    md.push_str(&format!(
+        "| Probes sent | {} |\n",
+        analysis.sample.total_probes_sent
+    ));
+    md.push_str(&format!(
+        "| Probes landed | {} |\n",
+        analysis.sample.total_probes_landed
+    ));
+    md.push_str(&format!(
+        "| **Target-block probes (primary)** | **{}** |\n",
+        analysis.sample.target_block_probes
+    ));
+    md.push_str(&format!(
+        "| Target-window probes (secondary) | {} |\n",
+        analysis.sample.target_window_probes
+    ));
+    md.push_str(&format!(
+        "| Probes outside target window | {} |\n",
+        analysis.sample.out_of_window_probes
+    ));
+    md.push_str(&format!(
+        "| Late bursts | {} |\n",
+        analysis.sample.late_bursts
+    ));
+    md.push_str(&format!(
+        "| Bursts with no target-block probe | {} |\n\n",
+        analysis.sample.missing_target_block_bursts
+    ));
+
+    md.push_str("## 4. Primary result: target-block ordering\n\n");
+    md.push_str("| Comparison | Usable blocks | Usable pairs | Mean τb (95% CI) | Permutation p | Sign-test p | Verdict |\n");
+    md.push_str("|---|---:|---:|---|---:|---:|---|\n");
+    md.push_str(&format!(
+        "| Priority fee vs index | {} | {} | {} | {} | {} | {} |\n",
+        analysis.fee_target_block.blocks_used,
+        analysis.fee_target_block.pairs_usable,
+        effect_cell(&analysis.fee_target_block),
+        p_cell(analysis.fee_target_block.permutation_p),
+        p_cell(analysis.fee_target_block.sign_test_p),
+        analysis.fee_target_block.verdict
+    ));
+    md.push_str(&format!(
+        "| Send order vs index | {} | {} | {} | {} | {} | {} |\n\n",
+        analysis.send_target_block.blocks_used,
+        analysis.send_target_block.pairs_usable,
+        effect_cell(&analysis.send_target_block),
+        p_cell(analysis.send_target_block.permutation_p),
+        p_cell(analysis.send_target_block.sign_test_p),
+        analysis.send_target_block.verdict
+    ));
+    md.push_str(&format!(
+        "**Primary conclusion:** {}  \n\n",
+        if analysis.sample.target_block_probes == 0 {
+            "No probe landed in a target block. The campaign cannot make a same-block ordering claim."
+                .to_string()
+        } else if analysis.fee_target_block.blocks_used < analysis.fee_target_block.min_blocks {
+            format!(
+                "Only {} usable target block(s); the pre-registered minimum is {}. No ordering claim is made.",
+                analysis.fee_target_block.blocks_used, analysis.fee_target_block.min_blocks
+            )
         } else {
-            0.0
-        };
+            analysis.fee_target_block.verdict.clone()
+        }
+    ));
 
-        let mut md = String::new();
+    md.push_str("## 5. Secondary result: target-window same-block pairs (exploratory)\n\n");
+    md.push_str(
+        "This view uses all same-block pairs inside the leader's window, including blocks after the \
+         first slot. It is *not* the primary estimand: a probe that arrives after the window starts can \
+         be affected by the send delay itself. It is reported for diagnostic continuity with v1.\n\n",
+    );
+    md.push_str("| Comparison | Usable blocks | Usable pairs | Mean τb (95% CI) | Permutation p | Verdict |\n");
+    md.push_str("|---|---:|---:|---|---:|---|\n");
+    md.push_str(&format!(
+        "| Priority fee vs index | {} | {} | {} | {} | {} |\n",
+        analysis.fee_target_window.blocks_used,
+        analysis.fee_target_window.pairs_usable,
+        effect_cell(&analysis.fee_target_window),
+        p_cell(analysis.fee_target_window.permutation_p),
+        analysis.fee_target_window.verdict
+    ));
+    md.push_str(&format!(
+        "| Send order vs index | {} | {} | {} | {} | {} |\n\n",
+        analysis.send_target_window.blocks_used,
+        analysis.send_target_window.pairs_usable,
+        if mode == crate::analyzer::ExecutionMode::Legacy {
+            "suppressed (synthetic timestamps)".to_string()
+        } else {
+            effect_cell(&analysis.send_target_window)
+        },
+        if mode == crate::analyzer::ExecutionMode::Legacy {
+            "n/a".to_string()
+        } else {
+            p_cell(analysis.send_target_window.permutation_p)
+        },
+        if mode == crate::analyzer::ExecutionMode::Legacy {
+            "Not interpretable: v1 send timestamps were synthesized at fixed intervals".to_string()
+        } else {
+            analysis.send_target_window.verdict.clone()
+        }
+    ));
 
-        md.push_str("# Empirical Investigation of Solana Validator Transaction Ordering Rules\n\n");
-        md.push_str("**Solana Mainnet Empirical Research Report**  \n");
-        md.push_str("*Measurement Campaign Date:* November 5, 2026 (Post-Alpenglow Upgrade Epoch 1076/1077)  \n");
-        md.push_str(&format!("*Report Generated:* {}  \n", now_str));
-        md.push_str(&format!("*Target Network:* Solana Mainnet-Beta (`{}`)  \n\n", config.rpc_url));
+    md.push_str("## 6. Per-validator same-block results (target block)\n\n");
+    md.push_str("| Validator | Client | Version | Bursts | Target-block probes | Fee τb | 95% CI | p | Verdict |\n");
+    md.push_str("|---|---|---|---:|---:|---:|---|---:|---|\n");
+    for validator in &analysis.per_validator {
+        md.push_str(&format!(
+            "| `{}` | {} | `{}` | {} | {} | {} | {} | {} | {} |\n",
+            validator.validator_identity,
+            validator.client_type,
+            validator.version_string,
+            validator.total_bursts,
+            validator.target_block_probes,
+            opt_num(validator.fee.mean_block_tau_b, 3),
+            ci_cell(&validator.fee),
+            p_cell(validator.fee.permutation_p),
+            validator.fee.verdict
+        ));
+    }
+    md.push('\n');
 
-        md.push_str("---\n\n");
-        md.push_str("## 1. Executive Summary & Core Findings\n\n");
-        md.push_str("This empirical measurement study answers the fundamental question: **By what rule do Solana validators order transactions inside their blocks, how strictly does that rule hold, and how does behavior diverge across client forks?**\n\n");
-        md.push_str("We deployed controlled transaction bursts into the leader windows of active Solana Mainnet validators spanning four distinct client implementations:\n");
-        md.push_str("1. **Agave (Anza v4.4.0)** – Standard open-source Rust client\n");
-        md.push_str("2. **Jito-Solana (JitoLabs v4.4.0)** – MEV-enabled client fork\n");
-        md.push_str("3. **Firedancer / Frankendancer (v26.10.5)** – Jump Crypto C/C++ ultra-low latency client\n");
-        md.push_str("4. **Agave-BAM (Block Architecture Module)** – External block building / optimization fork\n\n");
+    md.push_str("## 7. Per-pattern results (target block, fee comparison)\n\n");
+    md.push_str(
+        "| Pattern | Bursts | Target-block probes | Usable blocks | Mean τb | p | Verdict |\n",
+    );
+    md.push_str("|---|---:|---:|---:|---:|---:|---|\n");
+    for pattern in &analysis.per_pattern {
+        md.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {} | {} |\n",
+            pattern.pattern,
+            pattern.bursts,
+            pattern.target_block_probes,
+            pattern.fee.blocks_used,
+            opt_num(pattern.fee.mean_block_tau_b, 3),
+            p_cell(pattern.fee.permutation_p),
+            pattern.fee.verdict
+        ));
+    }
+    md.push('\n');
 
-        md.push_str("### Key Conclusions:\n");
-        md.push_str("- **Fee Prioritization vs. Channel Interleaving Noise**: Across all four client software families on Solana Mainnet, higher compute unit prices exhibit a statistically significant positive correlation with earlier block placement (Spearman $\\rho \\in [+0.155, +0.342]$, $p < 0.001$). However, multi-threaded BankingStage channels and public network transit introduce substantial positional interleaving jitter across non-conflicting accounts.\n");
-        md.push_str("- **Agave-BAM exhibited the highest fee density adherence ($\\rho = +0.342$, Strictness: 28%)**: BAM's external block-building pipeline clustered high-fee transactions earlier in the block more consistently than standard mempools.\n");
-        md.push_str("- **Agave & Jito-Solana display moderate fee bias with thread jitter ($\\rho = +0.234 - +0.278$, Strictness: 17-21%)**: Jito reserves an initial slot prefix for bundles, after which mempool transactions are processed with priority fee bias, while Agave's BankingStage worker channels execute non-conflicting transactions in parallel.\n");
-        md.push_str("- **Firedancer Live Mainnet Behavior ($\\rho = +0.176 - +0.206$, Strictness: 11-14%)**: While Firedancer's C `fd_pack` tile implements an internal min/max heap, remote multi-packet bursts on Mainnet span across 2-3 adjacent slots in the leader's 4-slot window and interleave with external traffic.\n");
-        md.push_str("- **Disentangling FIFO Arrival vs Fee Priority**: In our **Descending Fee bursts** (where the highest-fee transaction is transmitted *last* in the burst), high-fee transactions systematically overtook earlier low-fee transactions (landing at index 11-50 vs 126-208 for low fees), proving conclusively that **Priority Fee overrides FIFO send order**.\n\n");
-
-        md.push_str("![Figure 1: Priority Fee Rate vs Block Percentile Placement](figures/fig1_fee_vs_position.png)\n");
-        md.push_str("*Figure 1: Empirical relationship between Compute Unit Price and block index percentile across client software families on Solana Mainnet.*\n\n");
-
-        md.push_str("---\n\n");
-        md.push_str("## 2. Validator Comparative Matrix\n\n");
-        md.push_str("| Validator Identity | Client Fork | Version | Stake (SOL) | Bursts | Landed/Sent | Landing % | Avg Spearman $\\rho_{\\text{fee}}$ | Kendall $\\tau$ | Inferred Ordering Rule | Strictness |\n");
-        md.push_str("|---|---|---|---|---|---|---|---|---|---|---|\n");
-
-        for r in results {
+    md.push_str("## 8. On-chain verification\n\n");
+    match verification {
+        Some(report) => {
             md.push_str(&format!(
-                "| `{}` | {} | `{}` | {:.0} | {} | {}/{} | {:.1}% | **{:+.3}** | {:+.3} | {} | **{:.0}%** |\n",
-                &r.validator_identity[..12.min(r.validator_identity.len())],
-                r.client_type,
-                r.version_string,
-                r.stake_sol,
-                r.total_bursts_analyzed,
-                r.total_tx_landed,
-                r.total_tx_sent,
-                r.overall_landing_rate_pct,
-                r.avg_spearman_fee,
-                r.avg_kendall_tau_fee,
-                r.final_ordering_rule,
-                r.rule_strictness_score * 100.0
+                "**Status:** {}  \n**Confirmed signatures:** {}/{}  \n**Slot matches:** {}/{}  \n**Index matches:** {}/{}  \n**Fee matches:** {}/{}  \n**Target-block members:** {}  \n**Leader checks:** {}/{} matched  \n**Transaction errors:** {}\n\n",
+                if report.passed() { "PASS" } else { "FAIL / INCOMPLETE" },
+                report.confirmed,
+                report.total_signatures,
+                report.slot_matched,
+                report.total_signatures,
+                report.index_matched,
+                report.total_signatures,
+                report.fee_matched,
+                report.total_signatures,
+                report.target_block_members,
+                report.leaders_matched,
+                report.leaders_checked,
+                report.tx_errors
             ));
-        }
-
-        md.push_str("\n*Note: Spearman $\\rho_{\\text{fee}}$ measures rank correlation between priority fee and block position. Positive values indicate higher fee transactions land earlier in the block. Empirical p-values are calculated via 1,000 Monte Carlo permutations ($p < 0.01$).*\n\n");
-
-        md.push_str("### 2.1 Measurement Dates & Campaign Chronology\n");
-        md.push_str("Every transaction burst and block measurement was executed and recorded on **November 5, 2026** during Solana Mainnet-Beta Epoch 1076/1077 (post-Alpenglow upgrade). The exact UTC execution timestamps and target slot windows for every validator measurement are:\n\n");
-        md.push_str("| Validator Name | Identity Pubkey | Client Fork | Measurement Date | Time Window (UTC) | Target Slots | Total Confirmed Txs |\n");
-        md.push_str("|---|---|---|---|---|---|---|\n");
-        md.push_str("| **Agave Node Fd7btg** | `Fd7btgySsrju...` | Agave | 2026-11-05 | 19:03:07 - 19:03:10 | 465703960 - 465703964 | 32 / 32 |\n");
-        md.push_str("| **Helius Jito-Solana** | `HEL1USMZKAL2...` | Jito-Solana | 2026-11-05 | 19:09:22 - 19:09:25 | 465704336 - 465704340 | 32 / 32 |\n");
-        md.push_str("| **Agave-BAM Node DRpbCB** | `DRpbCBMxVnDK...` | Agave-BAM | 2026-11-05 | 19:14:48 - 19:14:51 | 465704672 - 465704676 | 32 / 32 |\n");
-        md.push_str("| **Jito Node E1r4Ps** | `E1r4Psq84tHf...` | Jito-Solana | 2026-11-05 | 19:25:31 - 19:25:34 | 465705692 - 465705696 | 32 / 32 |\n");
-        md.push_str("| **Firedancer JUPiTER** | `JUPiTERkf97e...` | Firedancer | 2026-11-05 | 19:30:14 - 19:30:17 | 465705980 - 465705984 | 32 / 32 |\n");
-        md.push_str("| **Harmonic Firedancer** | `EvnRmnMrd69k...` | Firedancer | 2026-11-05 | 19:38:55 - 19:38:58 | 465707848 - 465707852 | 32 / 32 |\n");
-        md.push_str("| **Agave Node EkvdKh** | `EkvdKhULRvdZ...` | Agave | 2026-11-05 | 19:42:15 - 19:42:18 | 465709388 - 465709392 | 24 / 24 |\n\n");
-        md.push_str("*Full nanosecond timestamps (`send_timestamp_ns`) for all 216 individual transactions are logged in `data/measurements.json`.*\n\n");
-
-        md.push_str("![Figure 3: Empirical Strictness & Correlation Coefficients Across Client Forks](figures/fig3_client_strictness.png)\n");
-        md.push_str("*Figure 3: Comparison of Spearman Rank Correlation ($\\rho_{\\text{fee}}$) and Kendall's Tau ($\\tau_{\\text{fee}}$) across target validators on Solana Mainnet.*\n\n");
-
-        let actual_spent_sol = if tracker.current_spent_sol() > 0.0 {
-            tracker.current_spent_sol()
-        } else {
-            let total_lamports: u64 = all_bursts.iter().flat_map(|b| &b.txs).map(|t| t.fee_paid_lamports).sum();
-            total_lamports as f64 / 1_000_000_000.0
-        };
-        let confirmed_count = if tracker.total_confirmed() > 0 {
-            tracker.total_confirmed()
-        } else {
-            total_tx_landed as u64
-        };
-        let cap_sol = tracker.cap_sol();
-        let rem_sol = (cap_sol - actual_spent_sol).max(0.0);
-        let spend_pct = (actual_spent_sol / cap_sol) * 100.0;
-
-        md.push_str("---\n\n");
-        md.push_str("## 3. Spend Cap Compliance & Budget Audit\n\n");
-        md.push_str(&format!("- **Enforced Spend Cap:** {:.4} SOL (Strict limit: 0.0500 SOL)\n", cap_sol));
-        md.push_str(&format!("- **Total Actually Spent:** {:.6} SOL ({:.1}% of cap)\n", actual_spent_sol, spend_pct));
-        md.push_str(&format!("- **Remaining Safety Balance:** {:.6} SOL\n", rem_sol));
-        md.push_str(&format!("- **Total Transactions Sent:** {}\n", total_tx_sent));
-        md.push_str(&format!("- **Total Transactions Confirmed:** {}\n", confirmed_count));
-        md.push_str(&format!("- **Overall Landing Rate:** {:.1}%\n\n", overall_rate));
-
-        md.push_str("---\n\n");
-        md.push_str("## 4. Experiment Design & Critical Nuances\n\n");
-
-        md.push_str("### 4.1 Leader Window Detection & Synchronization\n");
-        md.push_str("Solana assigns leader slots in 4-slot chunks (1.6 seconds). We fetch the active epoch schedule via `getLeaderSchedule` and compute upcoming slot indices relative to the epoch's `absolute_slot`.\n");
-        md.push_str("To avoid front-running network dropoffs, our engine synchronizes countdown timers and transmits transaction bursts exactly as the slot boundary ticks into the target leader's 4-slot window.\n\n");
-
-        md.push_str("### 4.2 Disentangling Send Order (FIFO) from Priority Fees\n");
-        md.push_str("A critical flaw in naive ordering tests is transmitting transactions in ascending fee order (Tx0=low, Tx7=high). In that design, if Tx7 lands later, one cannot tell whether it was delayed by network jitter, thread assignment, or low fee.\n");
-        md.push_str("To isolate these variables, we introduced **four distinct burst patterns**:\n");
-        md.push_str("1. **Ascending Fee:** Tests normal priority fee alignment.\n");
-        md.push_str("2. **Inverted / Descending Fee:** Tx0 is transmitted at $t_0$ with 10,000,000 $\\mu$L/CU; Tx7 is transmitted at $t_7$ with 100 $\\mu$L/CU. If Tx0 lands at the block head despite being sent earlier/later, fee priority overrules arrival order.\n");
-        md.push_str("3. **Alternating Fee:** Rapid alternation of high and low fees to measure scheduler interleaving dynamics.\n");
-        md.push_str("4. **Uniform Fee:** Constant fee across all transactions to isolate pure network arrival time and BankingStage channel hashing.\n\n");
-
-        md.push_str("![Figure 2: Disentangling FIFO Arrival vs Priority Fee Inversion](figures/fig2_fifo_vs_fee_inversion.png)\n");
-        md.push_str("*Figure 2: Empirical block position trajectories under the Descending Fee pattern. High fee transactions consistently jump ahead of earlier low-fee transactions, demonstrating fee prioritization over FIFO arrival order.*\n\n");
-
-        md.push_str("### 4.3 Isolation of Account Write-Lock Contention vs Pure Scheduler Ordering\n");
-        md.push_str("In Solana's transaction model, the fee-payer account (`payer.pubkey()`) declared at account index 0 is **always writable** because transaction base fees and priority fees must be debited from its lamport balance prior to instruction execution.\n");
-        md.push_str("Therefore, if all transactions in a burst declare the same fee payer, the runtime's Account Lock Manager must serialize their execution, forcing sequential processing and masking multi-threaded scheduler parallelism.\n\n");
-        md.push_str("To isolate scheduler queue sorting from runtime write-lock contention, our architecture implements two complementary modes:\n");
-        md.push_str("1. **Independent Fee-Payer Mode (`build_independent_burst`):** Each transaction in the burst is signed by a distinct ephemeral fee-payer keypair. Because no account write locks intersect, transactions flow freely across parallel BankingStage channels and `fd_pack` tiles without lock serialization.\n");
-        md.push_str("2. **Shared Fee-Payer Mode (`build_burst`):** All transactions share the same fee-payer account, testing how validators order write-conflicting transactions within their scheduling queues before execution.\n\n");
-
-        md.push_str("### 4.4 Noise vs Rule: Monte Carlo Permutation Testing\n");
-        md.push_str("To distinguish true deterministic scheduling rules from random network jitter and multi-threaded interleaving noise, we conduct **1,000-trial Monte Carlo Permutation Tests** for every validator burst.\n");
-        md.push_str("The null hypothesis ($H_0$) asserts that transaction positions in the block are independent of priority fees (random permutation). We compute the empirical $p$-value by evaluating the fraction of permuted rank orders that achieve or exceed the observed Spearman correlation:\n\n");
-        md.push_str("$$p = \\frac{1}{N} \\sum_{i=1}^N \\mathbb{I}\\left(|\\rho_{\\text{perm}}^{(i)}| \\ge |\\rho_{\\text{obs}}|\\right)$$\n\n");
-        md.push_str("For Firedancer ($p < 0.001$) and Jito-Solana ($p < 0.005$), $H_0$ is rejected at the 99% confidence level, proving the existence of a strict deterministic priority rule rather than noise.\n\n");
-
-        md.push_str("![Figure 4: Monte Carlo Permutation Test](figures/fig4_permutation_test.png)\n");
-        md.push_str("*Figure 4: Empirical distribution of Spearman rank correlations under random permutations (H0) vs the observed test statistic for BAM (rho = +0.342, p < 0.001).*\n\n");
-
-        md.push_str("### 4.5 What This Experiment Does NOT Separate (Deliberate Scope Boundaries)\n");
-        md.push_str("1. **RPC-to-Leader Transit Jitter:** Public RPC nodes forward transactions via TPU/QUIC to the current leader. Packet latency across internet transit (5-30ms) introduces slight jitter before packets reach the leader's network interface.\n");
-        md.push_str("2. **Jito Bundle Auctions:** Jito bundles execute through an out-of-band private relay engine (Block Engine) that guarantees atomic multi-transaction placement. We strictly test standard mempool transactions sent to Jito leaders, not private bundle tips.\n");
-        md.push_str("3. **Stake-Weighted QoS (SWQoS):** Nodes without stake may experience higher QUIC packet drop rates during periods of network congestion.\n\n");
-
-        md.push_str("### 4.6 Advanced Empirical Extensions (Extensions B & C)\n");
-        md.push_str("To explore scheduler edge cases beyond standard bursts, the engine implements two advanced benchmark suites:\n");
-        md.push_str("1. **Write-Lock Contention Benchmark (`--experiment contention`)**:\n");
-        md.push_str("   Deploys side-by-side burst pairs under the same leader window: an independent-payer burst (`build_independent_burst`, 0 write locks) vs a shared-payer burst (`build_burst`, 100% write lock contention). Results reveal an average **+10.5 block index penalty** for shared payers, demonstrating that Sealevel Account Lock Manager serialization delays transactions even when priority fees are high.\n");
-        md.push_str("2. **High-Density Saturation Scaling (`--experiment saturation`)**:\n");
-        md.push_str("   Dynamically scales priority fees across smooth logarithmic tiers ($10^2$ to $10^7$ $\\mu$L/CU) across burst sizes N = 8, 16, 32 to evaluate priority queue depth and saturation thresholds in `fd_pack` and `BankingStage`.\n\n");
-
-        if !contention_data.is_empty() {
-            md.push_str("#### Write-Lock Contention Benchmark Results (Empirical Data)\n\n");
-            md.push_str("| Validator | Client Fork | Independent Mean Idx | Shared Mean Idx | Lock Spread ($\\Delta$ index) | Contention Assessment |\n");
-            md.push_str("|---|---|---|---|---|---|\n");
-            for c in contention_data {
+            if !report.failures.is_empty() {
+                md.push_str(
+                    "| Burst | Signature | Kind | Expected | Actual |\n|---|---|---|---|---|\n",
+                );
+                for failure in report.failures.iter().take(20) {
+                    md.push_str(&format!(
+                        "| `{}` | `{}` | {} | `{}` | `{}` |\n",
+                        failure.burst_id,
+                        failure.signature.as_deref().unwrap_or("-"),
+                        failure.kind,
+                        failure.expected,
+                        failure.actual
+                    ));
+                }
+                md.push('\n');
+            }
+            for note in &report.notes {
+                md.push_str(&format!("- {note}\n"));
+            }
+            if report.tx_errors > 0 {
                 md.push_str(&format!(
-                    "| **{}** | {:?} | {:.1} | {:.1} | **{:+.1}** | {} |\n",
-                    c.validator_name, c.client_type, c.independent_mean_index, c.shared_mean_index, c.lock_serialization_spread, c.contention_delay_assessment
+                    "- **{} of {} transactions failed at execution.** Signatures, slots, block indexes, \
+                     and charged fees still match the chain. This is an execution failure, not a \
+                     verification mismatch, but it must not be hidden.\n",
+                    report.tx_errors, report.total_signatures
                 ));
+            }
+            if report.target_block_members == 0 {
+                md.push_str(
+                    "- **No transaction landed in a target block.** Target-block ordering cannot be \
+                     inferred from this campaign.\n",
+                );
             }
             md.push('\n');
         }
-
-        if !saturation_data.is_empty() {
-            md.push_str("#### Queue Depth Saturation Benchmark Results (Empirical Data)\n\n");
-            md.push_str("| Validator | Client Fork | Load Tier (N) | Landing % | Spearman $\\rho$ | Mean Block Index | Slot Spread | Saturation Assessment |\n");
-            md.push_str("|---|---|---|---|---|---|---|---|\n");
-            for s in saturation_data {
-                md.push_str(&format!(
-                    "| **{}** | {:?} | {} | {:.1}% | **{:+.3}** | {:.1} | {} | {} |\n",
-                    s.validator_name, s.client_type, s.density_tier, s.landing_rate_pct, s.spearman_fee, s.mean_index_in_block, s.slot_spread, s.saturation_assessment
-                ));
-            }
-            md.push('\n');
+        None => {
+            md.push_str(
+                "No verification file was found. Run `cargo run -- --verify-only --campaign-dir <dir>` \
+                 before citing the campaign.\n\n",
+            );
         }
-
-        md.push_str("---\n\n");
-        md.push_str("## 5. Client Software Deep Dive & Scheduler Architectures\n\n");
-
-        md.push_str("### 5.1 Agave (Anza Open-Source Client)\n");
-        md.push_str("- **Mechanism:** Agave utilizes `BankingStage` containing multiple worker threads (typically 6-12 depending on CPU cores). Incoming packets are distributed to worker threads by hashing account keys.\n");
-        md.push_str("- **Observed Rule:** Within each worker thread queue, transactions are sorted by Compute Budget price. However, because threads run concurrently and commit completed micro-batches into the block's PoH recorder independently, non-conflicting transactions display moderate interleaving ($\\rho \\approx 0.15 - 0.28$).\n\n");
-
-        md.push_str("### 5.2 Jito-Solana\n");
-        md.push_str("- **Mechanism:** Jito modifies the standard BankingStage to integrate bundle processing and centralized mempool prioritization. Bundles land in the leading slots of the block, after which normal transactions are processed through fee-prioritized queues.\n");
-        md.push_str("- **Observed Rule:** Reliable fee prioritization over arrival order, with moderate channel variance ($\\rho \\approx 0.23 - 0.25$). In Descending Fee bursts, highest fee transactions consistently land early in the non-bundle portion of the block.\n\n");
-
-        md.push_str("### 5.3 Firedancer (Jump Crypto)\n");
-        md.push_str("- **Mechanism:** Built in C/C++ from the ground up, Firedancer replaces multi-threaded channel queues with dedicated, lock-free ring-buffer tiles (`fd_pack` and `fd_bank`).\n");
-        md.push_str("- **Observed Rule:** While `fd_pack` tile maintains an internal min/max priority heap, remote public bursts over the live network land across 2-3 adjacent slots in the leader's 4-slot window, resulting in observed correlation ($\\rho \\approx 0.18 - 0.21$).\n\n");
-
-        md.push_str("### 5.4 Agave-BAM (Block Architecture Module)\n");
-        md.push_str("- **Mechanism:** BAM acts as an external block optimizer, assembling transaction bundles and mempool transactions by global fee density and MEV yield.\n");
-        md.push_str("- **Observed Rule:** Strongest fee density clustering in live testing ($\\rho \\approx 0.342$), actively ordering transactions to maximize block revenue.\n\n");
-
-        md.push_str("---\n\n");
-        md.push_str("## 6. What Went Wrong & Post-Mortem Analysis\n\n");
-        md.push_str("In the spirit of rigorous engineering and transparency, we document all practical obstacles encountered during Mainnet testing:\n\n");
-        md.push_str("1. **Public RPC Rate Limiting (HTTP 429):** Public endpoints (`api.mainnet-beta.solana.com`) aggressively throttle rapid `getBlock` requests. We resolved this by implementing exponential backoff with jitter and caching block payloads locally in `data/`.\n");
-        md.push_str("2. **Block Version Incompatibility:** Early iterations of `getBlock` with `maxSupportedTransactionVersion: 0` failed on modern Mainnet blocks containing Version 1 transactions. Updating to version 1 resolved all parsing errors.\n");
-        md.push_str("3. **JSON-RPC Serde Field Casing (`absoluteSlot`):** Solana JSON-RPC endpoints return camelCase fields (e.g. `absoluteSlot`, `lastValidBlockHeight`), whereas standard Rust serde defaults to snake_case. Adding explicit `#[serde(rename_all = \"camelCase\")]` resolved deserialization errors when querying epoch info and leader schedules directly from Mainnet.\n");
-        md.push_str("4. **Fee-Payer Write-Lock Serialization:** In initial tests, crafting multiple burst transactions with a single fee-payer keypair caused the Solana runtime to serialize execution on the fee-payer account write lock. We introduced `build_independent_burst` with distinct keypairs to decouple scheduler queue prioritization from runtime lock serialization.\n");
-        md.push_str("5. **Leader Window Slot Boundary Alignment:** Solana leader slots elapse in ~400ms chunks (4 slots = ~1.6s). Transmitting sequential burst patterns with standard confirmation sleep intervals caused subsequent bursts to exceed the target leader's 4-slot window. We decoupled patterns into independent scheduled windows fetched from the active epoch leader schedule.\n");
-        md.push_str("6. **Cumulative Spend Cap Tracking:** Initial spend-check implementations verified individual transaction fees against the cap rather than cumulative spent lamports. We refactored `SpendTracker` with atomic 2-phase reservation (`pre_check_spend` and `record_spend`) to guarantee absolute spend-cap compliance across repeated bursts.\n");
-        md.push_str("7. **Compute Unit (CU) Limit vs Instruction Completion:** To enforce microscopic priority fee spend (< 0.0012 SOL across 216 txs), `TxCrafter` initially set `cu_limit = 300`. Because SPL Memo consumes ~800 CUs, transactions landed in the block but encountered `exceeded CUs meter at BPF instruction`. In Solana's architecture, transaction ordering and block packing occur in the leader's scheduler (`BankingStage` / `fd_pack`) *prior to BPF execution*. The validator successfully prioritized, packed, and charged priority fees for each transaction, providing 100% valid ordering evidence. For future burst generation, `cu_limit` was raised to `1,000` CUs.\n\n");
-
-        md.push_str("---\n\n");
-        md.push_str("## 7. Raw Data Verification Guide for Judges\n\n");
-        md.push_str("Judges can verify all claims in this report directly on Solana Mainnet through three independent verification paths:\n\n");
-        md.push_str("### 1. Real-Time In-Browser Verifier (Zero Wallet Required)\n");
-        md.push_str("Visit the live dashboard at [**https://solana-tx-ordering.vercel.app**](https://solana-tx-ordering.vercel.app) and click **`⚡ Real-Time On-Chain Verifier`**:\n");
-        md.push_str("- Executes live read-only JSON-RPC queries (`getSignatureStatuses`) from your browser to Solana Mainnet.\n");
-        md.push_str("- Requires **zero wallet connection**, extensions, or private keys, adhering to Web3 read-only security practices.\n");
-        md.push_str("- Displays live latency, confirmed slot, and on-chain confirmation status, with direct clickable links to Solana Explorer.\n\n");
-
-        md.push_str("### 2. Automated CLI Verification Script (One Command):\n");
-        md.push_str("```bash\n");
-        md.push_str("python scripts/verify_claims.py\n");
-        md.push_str("```\n");
-        md.push_str("*Queries Solana Mainnet for confirmed transactions across all 7 target validators, verifying block slot, index, and spend cap compliance in seconds.*\n\n");
-
-        if let Some(first_burst) = all_bursts.first() {
-            md.push_str("### 3. Manual On-Chain Verification Sample:\n");
-            md.push_str("```bash\n");
-            md.push_str("# 1. Verify target block on Solana Mainnet\n");
-            md.push_str(&format!("solana block {} --url https://api.mainnet-beta.solana.com\n\n", first_burst.landed_slot));
-            md.push_str("# 2. Query transaction status via JSON-RPC\n");
-            if let Some(first_tx) = first_burst.txs.first() {
-                md.push_str("curl -s -X POST -H \"Content-Type: application/json\" \\\n");
-                md.push_str(&format!("  -d '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getTransaction\",\"params\":[\"{}\",{{\"encoding\":\"jsonParsed\",\"maxSupportedTransactionVersion\":1}}]}}' \\\n", first_tx.signature));
-                md.push_str("  https://api.mainnet-beta.solana.com\n");
-            }
-            md.push_str("```\n\n");
-        }
-
-        md.push_str("All raw JSON measurements are saved in the `./data/` directory and can be re-analyzed anytime via:\n");
-        md.push_str("```bash\n");
-        md.push_str("cargo run -- --analyze-only\n");
-        md.push_str("```\n");
-
-        md
     }
 
-    pub fn generate_html_dashboard(
-        results: &[ValidatorAggregatedResult],
-        all_bursts: &[BurstAnalysisResult],
-        tracker: &SpendTracker,
-        contention_data: &[ContentionBenchmarkResult],
-        saturation_data: &[SaturationBenchmarkResult],
-    ) -> String {
-        let results_json = serde_json::to_string(results).unwrap_or_else(|_| "[]".to_string());
-        let bursts_json = serde_json::to_string(all_bursts).unwrap_or_else(|_| "[]".to_string());
-        let contention_json = serde_json::to_string(contention_data).unwrap_or_else(|_| "[]".to_string());
-        let sat_json = serde_json::to_string(saturation_data).unwrap_or_else(|_| "[]".to_string());
+    md.push_str("## 9. Limitations and what went wrong\n\n");
+    if mode == crate::analyzer::ExecutionMode::Legacy {
+        md.push_str(
+            "This is the **v1 legacy dataset**, not a v2 campaign. Its limitations are material:\n\n\
+             - **Zero target-block probes.** All 216 transactions landed in slots after the first target \
+               slot; the original report's cross-block correlations cannot establish within-block ordering.\n\
+             - **All 216 transactions failed at runtime.** On-chain status reports \
+               `InstructionError: ProgramFailedToComplete`; the memo program exceeded its compute meter. \
+               Their signatures, slots, block indexes, and charged fees are verifiable, so the ordering \
+               sample is structurally real, but these were not successful probes and must not be described \
+               as such.\n\
+             - **On-chain fee ties.** The v1 fee tiers (100/1,000/5,000/10,000 uL/CU at a low CU limit) \
+               collapsed into only a few distinct charged fees (e.g., 5001, 5002, 5003). Tied fees cannot \
+               identify a fee-priority rule.\n\
+             - **Synthesized timing.** The v1 `send_timestamp_ns` values were generated at fixed 80 ms \
+               intervals and are not the on-chain memo timestamps.\n\
+             - **Memo mismatch.** On-chain memos use `superteam-ua:` while the v1 code emitted \
+               `solana-tx-order:`; the old verifier did not check this.\n\
+             - **Synthetic auxiliary data.** `contention_benchmark.json` and `saturation_benchmark.json` \
+               were dry-run simulator outputs presented as empirical data.\n\
+             - **Validator identity error.** The v1 roster contained `EkvdKhULRvdZq4E3yqj945rXw1yE8s1V8k4e7d5N5e8`, \
+               which is not the on-chain leader identity `EkvdKhULbMFqjKBKotAzGi3kwMvMpYNDKJXXQQmi6C1f`.\n\
+             - **Reporting errors.** The old report cited p < 0.001 and \"conclusive\" scheduling claims \
+               that its own data did not support; it also stated the wrong measurement time and epoch.\n\n\
+             The target-window fee statistic above is diagnostic negative evidence, not a validator comparison.\n\n",
+        );
+    } else if mode == crate::analyzer::ExecutionMode::DryRun {
+        md.push_str(
+            "**Dry-run.** Block placements are synthetic. This run validates the pipeline, report \
+             generation, spend accounting, and statistics; it says nothing about mainnet validators. \
+             No mainnet transaction was broadcast.\n\n",
+        );
+    } else {
+        md.push_str(
+            "- The campaign only observes inclusion and within-block order; it does not observe the \
+               validator's internal scheduler or Jito bundle auctions.\n\
+             - The target block may be skipped or unavailable; those bursts remain in the sample \
+               accounting but contribute no target-block pairs.\n\
+             - With a shared payer, the fee-payer write lock can serialize probes before the scheduler. \
+               Use `--payer-mode independent` for a cleaner design.\n\
+             - Public RPC `getSlot` polling is not a precision clock. Recorded send slots are the best \
+               available estimate; the raw dispatch timestamps are included in the campaign data.\n\
+             - The randomization test is conditional on the observed blocks; it cannot recover probes \
+               that never landed.\n\n",
+        );
+    }
 
-        let spent_sol = if tracker.current_spent_sol() > 0.0 {
-            tracker.current_spent_sol()
-        } else {
-            let total_lamports: u64 = all_bursts.iter().flat_map(|b| &b.txs).map(|t| t.fee_paid_lamports).sum();
-            total_lamports as f64 / 1_000_000_000.0
-        };
-        let cap_sol = tracker.cap_sol();
-        let spend_pct = (spent_sol / cap_sol) * 100.0;
-        let rem_sol = (cap_sol - spent_sol).max(0.0);
+    if !analysis.warnings.is_empty() {
+        md.push_str("### Machine-generated warnings\n\n");
+        for warning in &analysis.warnings {
+            md.push_str(&format!("- {warning}\n"));
+        }
+        md.push('\n');
+    }
 
+    md.push_str("## 10. Reproduction and data layout\n\n");
+    md.push_str("```bash\n");
+    md.push_str("# Inspect the committed legacy data without sending anything\n");
+    md.push_str("cargo run --release -- --analyze-only --campaign-dir data/legacy-v1\n\n");
+    md.push_str("# Re-run a pipeline-validating dry-run (no network broadcast)\n");
+    md.push_str(
+        "cargo run --release -- --dry-run --patterns randomized,uniform --repetitions 1\n\n",
+    );
+    md.push_str("# Verify a saved campaign against mainnet (read-only)\n");
+    md.push_str("cargo run --release -- --verify-only --campaign-dir data/campaigns/<id>\n");
+    md.push_str("```\n\n");
+    md.push_str(&format!(
+        "Raw campaign data: `{}`  \n{}\nSpend journal: `{}`\n\n",
+        campaign
+            .dir
+            .as_deref()
+            .map(|d| d.display().to_string())
+            .unwrap_or_else(|| "(legacy JSON)".to_string()),
+        raw_blocks_note(campaign),
+        spend_path(campaign)
+    ));
+
+    md.push_str("## 11. Data dictionary\n\n");
+    md.push_str(
+        "- `campaign.json`: immutable campaign metadata, validator roster, timestamps, spend, notes.\n\
+         - `bursts.json`: one record per burst, including every sent probe, every miss, raw signatures, \
+           landed slot, block index, charged fee, send order, fee rank, and provenance.\n\
+         - `raw_blocks/<slot>.json`: full parsed block used for index/fee/leader verification.\n\
+         - `verification.json`: signature status, slot, index, fee, memo, and leader-schedule checks.\n\
+         - `analysis.json`: machine-readable statistics and report bundle.\n\n",
+    );
+
+    md.push_str("## 12. Statistical definitions\n\n");
+    md.push_str(
+        "- **τb**: Kendall's tau-b computed per block with ties in fee/send order and block index \
+           handled by the standard tie correction.\n\
+         - **Mean τb**: unweighted mean of block-level τb; each block contributes one cluster.\n\
+         - **95% CI**: percentile interval from bootstrapping whole blocks (2,000 resamples).\n\
+         - **Permutation p**: two-sided Monte Carlo p-value from shuffling the comparison values within \
+           each block (10,000 trials by default), with a +1 correction.\n\
+         - **Sign-test p**: exact two-sided binomial test over the signs of non-zero block τb values; \
+           low power, reported for transparency.\n\n",
+    );
+
+    md.push_str("## 13. Spend accounting\n\n");
+    let (cap, spent, sent, confirmed) = effective_spend(campaign, spend);
+    let remaining = cap.saturating_sub(spent);
+    md.push_str(&format!(
+        "| Field | Value |\n|---|---:|\n| Cap | {} lamports |\n| Spent (this campaign) | {} lamports |\n| Reserved | {} lamports |\n| Remaining under cap | {} lamports |\n| Transactions sent | {} |\n| Transactions confirmed | {} |\n\n",
+        cap,
+        spent,
+        if campaign.meta.execution_mode == crate::analyzer::ExecutionMode::Legacy { 0 } else { spend.reserved_lamports },
+        remaining,
+        sent,
+        confirmed
+    ));
+    if campaign.meta.execution_mode == crate::analyzer::ExecutionMode::Legacy {
+        md.push_str(
+            "Legacy totals were reconstructed from the charged fees stored in `measurements.json`; no \
+             v2 spend tracker state existed for that campaign. The v1 transactions did pay these fees \
+             even though their memo instructions failed.\n",
+        );
+    } else {
+        md.push_str(
+            "The spend tracker reserves worst-case fees before dispatch, commits the charged fee after \
+             dispatch, and appends an audit line to the campaign or global live journal. The 0.05 SOL \
+             hard cap is enforced before dispatch and is replayed from the journal on restart; it is \
+             never reset silently.\n",
+        );
+    }
+
+    md
+}
+
+fn status_banner(campaign: &Campaign, analysis: &CampaignAnalysis) -> String {
+    let mode = campaign.meta.execution_mode;
+    let body = match mode {
+        crate::analyzer::ExecutionMode::Live => format!(
+            "**LIVE CAMPAIGN.** {} target-block probes across {} usable block clusters. {}",
+            analysis.sample.target_block_probes, analysis.fee_target_block.blocks_used, analysis.fee_target_block.verdict
+        ),
+        crate::analyzer::ExecutionMode::DryRun => format!(
+            "**DRY-RUN — SYNTHETIC PLACEMENTS.** Pipeline validation only. {} target-block probes; none are mainnet evidence.",
+            analysis.sample.target_block_probes
+        ),
+        crate::analyzer::ExecutionMode::Legacy => format!(
+            "**LEGACY V1 DATA — NOT A VALID WITHIN-BLOCK EXPERIMENT.** {} target-block probes. The old report's p-values and conclusions are not reproduced.",
+            analysis.sample.target_block_probes
+        ),
+        crate::analyzer::ExecutionMode::Mixed => format!(
+            "**MIXED PROVENANCE.** {} target-block probes; inspect per-burst provenance before citing.",
+            analysis.sample.target_block_probes
+        ),
+    };
+    format!("> {body}\n")
+}
+
+fn effect_cell(stats: &SameBlockStats) -> String {
+    match stats.mean_block_tau_b {
+        Some(tau) => format!(
+            "{:+.3} ({:+.3}..{:+.3})",
+            tau,
+            stats.ci95_low.unwrap_or(f64::NAN),
+            stats.ci95_high.unwrap_or(f64::NAN)
+        ),
+        None => "n/a".to_string(),
+    }
+}
+
+fn ci_cell(stats: &SameBlockStats) -> String {
+    match (stats.ci95_low, stats.ci95_high) {
+        (Some(lo), Some(hi)) => format!("{:+.3}..{:+.3}", lo, hi),
+        _ => "n/a".to_string(),
+    }
+}
+
+fn p_cell(p: Option<f64>) -> String {
+    match p {
+        Some(value) if value < 0.001 => format!("{value:.2e}"),
+        Some(value) => format!("{value:.3}"),
+        None => "n/a".to_string(),
+    }
+}
+
+fn opt_num(value: Option<f64>, decimals: usize) -> String {
+    match value {
+        Some(value) => format!("{value:+.*}", decimals),
+        None => "n/a".to_string(),
+    }
+}
+
+fn effective_spend(
+    campaign: &Campaign,
+    _spend: &crate::spend_tracker::SpendSummary,
+) -> (u64, u64, u64, u64) {
+    // The campaign metadata is the authoritative per-campaign total. The live
+    // journal may include earlier campaigns, and an analyze-only run has no
+    // live tracker state at all.
+    (
+        campaign.meta.spend_cap_lamports,
+        campaign.meta.total_spent_lamports,
+        campaign.meta.total_tx_sent as u64,
+        campaign.meta.total_tx_landed as u64,
+    )
+}
+
+fn raw_blocks_note(campaign: &Campaign) -> String {
+    let Some(dir) = &campaign.dir else {
+        return "Raw blocks: not saved; legacy data is the original measurements JSON.".to_string();
+    };
+    let raw_dir = dir.join(crate::campaign::RAW_BLOCKS_DIR);
+    let count = fs::read_dir(&raw_dir)
+        .map(|entries| entries.filter_map(|e| e.ok()).count())
+        .unwrap_or(0);
+    if count > 0 {
         format!(
-            r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <title>Solana Validator Ordering Engine - Windows 95 Style</title>
-  <style>
-    * {{
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-      font-family: "MS Sans Serif", Tahoma, sans-serif;
-      font-size: 11px;
-    }}
-    body {{
-      background-color: #008080;
-      color: #000;
-      padding: 10px;
-      overflow-x: hidden;
-    }}
-    .win95-window {{
-      background: #c0c0c0;
-      border-top: 2px solid #fff;
-      border-left: 2px solid #fff;
-      border-right: 2px solid #000;
-      border-bottom: 2px solid #000;
-      box-shadow: 2px 2px 0 rgba(0,0,0,0.5);
-      margin-bottom: 12px;
-    }}
-    .win95-titlebar {{
-      background: linear-gradient(90deg, #000080, #1084d0);
-      color: #fff;
-      padding: 3px 6px;
-      font-weight: bold;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }}
-    .win95-btn {{
-      background: #c0c0c0;
-      border-top: 1px solid #fff;
-      border-left: 1px solid #fff;
-      border-right: 1px solid #000;
-      border-bottom: 1px solid #000;
-      padding: 2px 6px;
-      cursor: pointer;
-      font-size: 10px;
-    }}
-    .win95-btn:active {{
-      border-top: 1px solid #000;
-      border-left: 1px solid #000;
-      border-right: 1px solid #fff;
-      border-bottom: 1px solid #fff;
-    }}
-    .win95-body {{
-      padding: 10px;
-    }}
-    .win95-tabbar {{
-      display: flex;
-      gap: 2px;
-      border-bottom: 2px solid #808080;
-      margin-bottom: 12px;
-      padding-left: 2px;
-    }}
-    .win95-tab {{
-      background: #c0c0c0;
-      border: 2px solid;
-      border-color: #fff #808080 #808080 #fff;
-      border-bottom: none;
-      padding: 4px 14px;
-      font-family: inherit;
-      font-size: 11px;
-      font-weight: normal;
-      cursor: pointer;
-      margin-bottom: -2px;
-      color: #000;
-      outline: none;
-    }}
-    .win95-tab:hover {{
-      background: #d8d8d8;
-    }}
-    .win95-tab.active {{
-      background: #c0c0c0;
-      font-weight: bold;
-      border-bottom: 2px solid #c0c0c0;
-      z-index: 2;
-      padding-top: 5px;
-    }}
-    .tab-content {{
-      display: none;
-    }}
-    .tab-content.active {{
-      display: block;
-    }}
-    .sunken {{
-      background: #fff;
-      border-top: 2px solid #808080;
-      border-left: 2px solid #808080;
-      border-right: 2px solid #fff;
-      border-bottom: 2px solid #fff;
-      padding: 8px;
-      overflow-x: auto;
-    }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-    }}
-    th {{
-      background: #c0c0c0;
-      border: 1px solid #808080;
-      padding: 4px;
-      text-align: left;
-    }}
-    td {{
-      border: 1px solid #e0e0e0;
-      padding: 4px;
-    }}
-    .stat-badge {{
-      display: inline-block;
-      padding: 2px 6px;
-      border-radius: 2px;
-      font-weight: bold;
-    }}
-    .badge-firedancer {{ background: #ffcc99; color: #802000; }}
-    .badge-jito {{ background: #d0f0c0; color: #006000; }}
-    .badge-agave {{ background: #cce5ff; color: #004085; }}
-    .badge-bam {{ background: #e2d9f3; color: #38146e; }}
-    .grid-2 {{
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-    }}
-    .fuel-meter {{
-      width: 100%;
-      height: 18px;
-      background: #fff;
-      border: 1px solid #808080;
-      position: relative;
-    }}
-    .fuel-fill {{
-      height: 100%;
-      background: linear-gradient(90deg, #00aa00, #ffaa00, #ff0000);
-      width: {spend_pct:.1}%;
-    }}
-    .fuel-text {{
-      position: absolute;
-      top: 1px;
-      left: 6px;
-      font-weight: bold;
-      color: #000;
-    }}
-    .chart-container {{
-      height: 180px;
-      background: #000;
-      position: relative;
-      border: 2px inset #fff;
-      display: flex;
-      align-items: flex-end;
-      padding: 10px;
-      gap: 8px;
-    }}
-    .bar-col {{
-      flex: 1;
-      background: #00ff00;
-      border-top: 1px solid #fff;
-      text-align: center;
-      font-size: 9px;
-      color: #fff;
-      position: relative;
-    }}
-  </style>
-</head>
-<body>
-
-  <!-- Main Window -->
-  <div class="win95-window">
-    <div class="win95-titlebar">
-      <span>Solana Validator Ordering Experiment Analyzer (Windows 95 Style)</span>
-      <div>
-        <button class="win95-btn">_</button>
-        <button class="win95-btn">□</button>
-        <button class="win95-btn" onclick="alert('Solana Validator Ordering Explorer')">X</button>
-      </div>
-    </div>
-    <div class="win95-body">
-      <div style="margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
-        <div>
-          <b>Network:</b> Solana Mainnet-Beta | <b>Epoch:</b> 1076 | <b>Upgrade Phase:</b> Post-Alpenglow
-        </div>
-        <div>
-          <button class="win95-btn" onclick="location.reload()">Refresh Metrics</button>
-          <button class="win95-btn" onclick="window.open('REPORT.md')">View Full Markdown Report</button>
-          <button class="win95-btn" onclick="openLiveVerificationModal()" style="font-weight: bold; background: #000080; color: #fff; border: 2px outset #fff; margin-left: 4px;">⚡ Real-Time On-Chain Verifier</button>
-        </div>
-      </div>
-
-      <!-- Windows 95 Tab Control -->
-      <div class="win95-tabbar">
-        <button class="win95-tab active" id="tabbtn-ordering" onclick="switchTab('ordering')">📊 Ordering Rules (Standard)</button>
-        <button class="win95-tab" id="tabbtn-contention" onclick="switchTab('contention')">🔒 Write-Lock Contention</button>
-        <button class="win95-tab" id="tabbtn-saturation" onclick="switchTab('saturation')">📈 Queue Saturation</button>
-        <button class="win95-tab" id="tabbtn-figures" onclick="switchTab('figures')">🔬 Publication Figures</button>
-        <button class="win95-tab" id="tabbtn-verifier" onclick="switchTab('verifier')">⚡ On-Chain Verifier</button>
-      </div>
-
-      <!-- TAB 1: STANDARD ORDERING -->
-      <div id="tab-ordering" class="tab-content active">
-        <!-- Spend Tracker Meter -->
-        <div class="win95-window" style="margin-bottom: 10px;">
-          <div class="win95-titlebar" style="background: #808080;">
-            <span>Spend Cap Safety Monitor (Strict 0.05 SOL Cap)</span>
-          </div>
-          <div class="win95-body">
-            <div class="fuel-meter">
-              <div class="fuel-fill"></div>
-              <div class="fuel-text">Spent: {spent_sol:.6} SOL / Cap: {cap_sol:.4} SOL ({spend_pct:.1}% utilized) - Remaining: {rem_sol:.6} SOL</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Validators Matrix -->
-        <div class="sunken" style="margin-bottom: 10px;">
-          <h3 style="margin-bottom: 6px;">📊 Validator Ordering Rule Matrix (Analyzed across Client Software Versions)</h3>
-          <table>
-            <thead>
-              <tr>
-                <th>Validator</th>
-                <th>Client Software</th>
-                <th>Version</th>
-                <th>Bursts</th>
-                <th>Landing Rate</th>
-                <th>Spearman Fee ρ</th>
-                <th>Kendall Tau</th>
-                <th>Inferred Rule</th>
-                <th>Strictness</th>
-                <th>On-Chain Proof</th>
-              </tr>
-            </thead>
-            <tbody id="val-table"></tbody>
-          </table>
-        </div>
-
-        <!-- Analysis Charts -->
-        <div class="grid-2">
-          <div class="win95-window">
-            <div class="win95-titlebar" style="background: #000080;">
-              <span>📈 Priority Fee vs Position Correlation by Client</span>
-            </div>
-            <div class="win95-body">
-              <div class="chart-container" id="bar-chart">
-                <!-- Dynamically rendered -->
-              </div>
-              <div style="font-size: 10px; margin-top: 4px; color: #444;">
-                *Higher score = strictly orders highest priority fee earlier in block.
-              </div>
-            </div>
-          </div>
-
-          <div class="win95-window">
-            <div class="win95-titlebar" style="background: #000080;">
-              <span>🔬 Scientific Hypothesis & Ordering Principles</span>
-            </div>
-            <div class="win95-body" style="background: #fff; border: 1px inset #808080; height: 194px; overflow-y: auto; padding: 6px;">
-              <p><b>1. Agave-BAM (Block Arch):</b> Highest fee density adherence in live testing (&rho; = +0.342, Strictness: 28%). Actively optimizes global fee yield.</p><br>
-              <p><b>2. Agave (Anza):</b> Multi-threaded BankingStage channels (&rho; = +0.155 to +0.278, Strictness: 15&ndash;21%). Concurrency causes interleaving across independent accounts.</p><br>
-              <p><b>3. Jito-Solana:</b> Dedicates initial slot prefix to auction bundles, followed by fee-prioritized mempool queues (&rho; = +0.234 to +0.252, Strictness: 17&ndash;19%).</p><br>
-              <p><b>4. Firedancer (Jump Crypto):</b> Dedicated C <code>fd_pack</code> priority heap tile (&rho; = +0.176 to +0.206, Strictness: 11&ndash;14%). Remote network transit spreads packets across leader slots.</p><br>
-              <p><b>5. FIFO Disentanglement:</b> Inverted Descending Fee bursts prove that high fees override arrival order across all client forks.</p>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- TAB 2: WRITE-LOCK CONTENTION -->
-      <div id="tab-contention" class="tab-content">
-        <div class="win95-window" style="margin-bottom: 10px;">
-          <div class="win95-titlebar" style="background: #000080;">
-            <span>🔬 Sealevel Write-Lock Serialization vs Parallel Execution Queue</span>
-          </div>
-          <div class="win95-body" style="background: #fff; border: 1px inset #808080; padding: 10px; font-size: 11px;">
-            <p><b>Sealevel Runtime Lock Contention Principle:</b> Account index 0 (fee-payer) is always marked writable in standard Solana transactions. In high-frequency bursts, transactions sharing the same fee-payer account cannot execute in parallel across <code>BankingStage</code> worker threads; the Account Lock Manager serializes them, resulting in a measurable delay (+10.5 average block index shift) in block placement relative to bursts utilizing independent keypairs.</p>
-          </div>
-        </div>
-
-        <div class="sunken" style="margin-bottom: 10px;">
-          <h3 style="margin-bottom: 6px;">🔒 Write-Lock Contention Benchmark Results (Shared Payer vs Independent Payers)</h3>
-          <table>
-            <thead>
-              <tr>
-                <th>Validator</th>
-                <th>Client Fork</th>
-                <th>Independent Mean Idx</th>
-                <th>Shared Mean Idx</th>
-                <th>Lock Spread (Δ index)</th>
-                <th>Contention Penalty Assessment</th>
-              </tr>
-            </thead>
-            <tbody id="contention-tbody"></tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- TAB 3: QUEUE SATURATION -->
-      <div id="tab-saturation" class="tab-content">
-        <div class="win95-window" style="margin-bottom: 10px;">
-          <div class="win95-titlebar" style="background: #000080;">
-            <span>📈 Queue Saturation & Multi-Slot Dispersion Benchmark</span>
-          </div>
-          <div class="win95-body" style="background: #fff; border: 1px inset #808080; padding: 10px; font-size: 11px;">
-            <p><b>Load Scaling Principle:</b> Evaluates priority queue stability and scheduler degradation under increasing burst densities (N = 8, 16, 32 transactions/burst). When burst volume approaches queue capacity, transactions overflow across multiple adjacent slots within the leader's 4-slot window, testing the sorting resilience of <code>fd_pack</code> and <code>BankingStage</code>.</p>
-          </div>
-        </div>
-
-        <div class="sunken" style="margin-bottom: 10px;">
-          <h3 style="margin-bottom: 6px;">📈 Queue Saturation Benchmark Results across Load Tiers (N = 8, 16, 32)</h3>
-          <table>
-            <thead>
-              <tr>
-                <th>Validator</th>
-                <th>Client Fork</th>
-                <th>Burst Load (N)</th>
-                <th>Landing Rate</th>
-                <th>Spearman Fee ρ</th>
-                <th>Mean Block Index</th>
-                <th>Slot Spread</th>
-                <th>Saturation Assessment</th>
-              </tr>
-            </thead>
-            <tbody id="saturation-tbody"></tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- TAB 4: PUBLICATION FIGURES -->
-      <div id="tab-figures" class="tab-content">
-        <div class="win95-window">
-          <div class="win95-titlebar" style="background: #000080;">
-            <span>📊 Gnuplot Publication-Quality Empirical Graphics (Generated via gnuplot 6.0)</span>
-          </div>
-          <div class="win95-body" style="background: #fff; border: 2px inset #808080; padding: 10px;">
-            <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-              <button class="win95-btn" onclick="showFig('fig1')">Fig 1: Fee vs Position</button>
-              <button class="win95-btn" onclick="showFig('fig2')">Fig 2: FIFO vs Fee Inversion</button>
-              <button class="win95-btn" onclick="showFig('fig3')">Fig 3: Client Strictness</button>
-              <button class="win95-btn" onclick="showFig('fig4')">Fig 4: Monte Carlo Permutation</button>
-            </div>
-            <div style="text-align: center; background: #eee; padding: 8px; border: 1px solid #ccc;">
-              <img id="active-fig" src="figures/fig1_fee_vs_position.png" style="max-width: 100%; height: auto; max-height: 480px; border: 1px solid #999;" alt="Gnuplot Figure" />
-              <div id="fig-caption" style="font-weight: bold; margin-top: 6px; font-size: 11px;">
-                Figure 1: Compute Unit Price (uL/CU) vs Confirmed Block Index Placement Percentile across Client Software.
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- TAB 5: ON-CHAIN VERIFIER -->
-      <div id="tab-verifier" class="tab-content">
-        <div class="win95-window">
-          <div class="win95-titlebar" style="background: #000080;">
-            <span>⚡ Real-Time On-Chain Verifier (Zero-Wallet Read-Only RPC)</span>
-          </div>
-          <div class="win95-body" style="padding: 10px;">
-            <div style="background: #ffffcc; border: 1px solid #999; padding: 8px; margin-bottom: 10px; font-size: 11px;">
-              <b>🔒 Zero-Friction Read-Only Verification:</b> This tool executes real-time JSON-RPC queries directly against Solana Mainnet-Beta from your browser. No wallet connection or browser extensions are required or requested.
-            </div>
-            
-            <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 10px;">
-              <label><b>Target RPC:</b></label>
-              <input id="tab-rpc-endpoint-input" type="text" value="https://api.mainnet-beta.solana.com" style="flex: 1; padding: 3px 5px; font-family: monospace; font-size: 11px; border: 2px inset #808080;" />
-              <button class="win95-btn" id="tab-start-audit-btn" onclick="runLiveInBrowserAuditTab()" style="font-weight: bold; padding: 3px 12px; background: #000080; color: #fff; border: 2px outset #fff;">⚡ Run Real-Time Audit</button>
-            </div>
-
-            <!-- Progress Bar -->
-            <div style="margin-bottom: 10px;">
-              <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
-                <span id="tab-audit-status-text">Status: Ready to audit 7 validators across Solana Mainnet.</span>
-                <span id="tab-audit-pct-text">0%</span>
-              </div>
-              <div style="width: 100%; height: 20px; background: #fff; border: 2px inset #808080; position: relative;">
-                <div id="tab-audit-progress-bar" style="height: 100%; width: 0%; background: #000080; transition: width 0.3s;"></div>
-              </div>
-            </div>
-
-            <!-- Live Results Table -->
-            <div class="sunken" style="max-height: 380px; overflow-y: auto;">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Validator</th>
-                    <th>Client Fork</th>
-                    <th>Slot</th>
-                    <th>Confirmed Signature</th>
-                    <th>Mainnet Status</th>
-                    <th>Explorer</th>
-                  </tr>
-                </thead>
-                <tbody id="tab-live-audit-tbody">
-                  <!-- Dynamically populated -->
-                </tbody>
-              </table>
-            </div>
-
-            <div id="tab-audit-summary-badge" style="margin-top: 10px; font-size: 11px; font-weight: bold; color: #555;">
-              Click 'Run Real-Time Audit' to query Solana Mainnet JSON-RPC live.
-            </div>
-          </div>
-        </div>
-      </div>
-
-    </div>
-  </div>
-
-  <!-- Live Mainnet In-Browser Verification Modal (Windows 95 Style) -->
-  <div id="verify-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); z-index: 9999; justify-content: center; align-items: center;">
-    <div class="win95-window" style="width: 820px; max-width: 95vw; max-height: 90vh; display: flex; flex-direction: column;">
-      <div class="win95-titlebar">
-        <span>🔍 Live Solana Mainnet On-Chain Verifier (Zero-Wallet Read-Only RPC)</span>
-        <div>
-          <button class="win95-btn" onclick="closeLiveVerificationModal()">X</button>
-        </div>
-      </div>
-      <div class="win95-body" style="overflow-y: auto; padding: 10px;">
-        <div style="background: #ffffcc; border: 1px solid #999; padding: 8px; margin-bottom: 10px; font-size: 11px;">
-          <b>🔒 Zero-Friction Read-Only Verification:</b> This tool executes real-time JSON-RPC queries directly against Solana Mainnet-Beta from your browser. No wallet connection or browser extensions are required or requested.
-        </div>
-        
-        <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 10px;">
-          <label><b>Target RPC:</b></label>
-          <input id="rpc-endpoint-input" type="text" value="https://api.mainnet-beta.solana.com" style="flex: 1; padding: 3px 5px; font-family: monospace; font-size: 11px; border: 2px inset #808080;" />
-          <button class="win95-btn" id="start-audit-btn" onclick="runLiveInBrowserAudit()" style="font-weight: bold; padding: 3px 12px; background: #000080; color: #fff; border: 2px outset #fff;">⚡ Run Real-Time Audit</button>
-        </div>
-
-        <!-- Progress Bar -->
-        <div style="margin-bottom: 10px;">
-          <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
-            <span id="audit-status-text">Status: Ready to audit 7 validators across Solana Mainnet.</span>
-            <span id="audit-pct-text">0%</span>
-          </div>
-          <div style="width: 100%; height: 20px; background: #fff; border: 2px inset #808080; position: relative;">
-            <div id="audit-progress-bar" style="height: 100%; width: 0%; background: #000080; transition: width 0.3s;"></div>
-          </div>
-        </div>
-
-        <!-- Live Results Table -->
-        <div class="sunken" style="max-height: 280px; overflow-y: auto;">
-          <table>
-            <thead>
-              <tr>
-                <th>Validator</th>
-                <th>Client Fork</th>
-                <th>Slot</th>
-                <th>Confirmed Signature</th>
-                <th>Mainnet Status</th>
-                <th>Explorer</th>
-              </tr>
-            </thead>
-            <tbody id="live-audit-tbody">
-              <!-- Dynamically populated -->
-            </tbody>
-          </table>
-        </div>
-
-        <div style="margin-top: 10px; display: flex; justify-content: space-between; align-items: center;">
-          <div id="audit-summary-badge" style="font-size: 11px; font-weight: bold; color: #555;">
-            Click 'Run Real-Time Audit' to query Solana Mainnet JSON-RPC live.
-          </div>
-          <button class="win95-btn" onclick="closeLiveVerificationModal()" style="padding: 4px 14px;">Close</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <script>
-    const results = {results_json};
-    const bursts = {bursts_json};
-    const contentionData = {contention_json};
-    const saturationData = {sat_json};
-
-    function switchTab(tabId) {{
-      document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-      document.querySelectorAll('.win95-tab').forEach(el => el.classList.remove('active'));
-      
-      const content = document.getElementById('tab-' + tabId);
-      const btn = document.getElementById('tabbtn-' + tabId);
-      if (content) content.classList.add('active');
-      if (btn) btn.classList.add('active');
-
-      if (tabId === 'verifier') {{
-        renderAuditTableInitialTab();
-      }}
-    }}
-
-    const cTbody = document.getElementById('contention-tbody');
-    if (cTbody && contentionData.length > 0) {{
-      cTbody.innerHTML = contentionData.map(c => `
-        <tr>
-          <td><b>${{c.validator_name}}</b></td>
-          <td><code>${{c.client_type}}</code></td>
-          <td>${{c.independent_mean_index.toFixed(1)}}</td>
-          <td>${{c.shared_mean_index.toFixed(1)}}</td>
-          <td><b>${{c.lock_serialization_spread > 0 ? '+' : ''}}${{c.lock_serialization_spread.toFixed(1)}}</b></td>
-          <td><span style="color: ${{c.lock_serialization_spread > 5.0 ? '#800000' : '#008000'}}; font-weight: bold;">${{c.contention_delay_assessment}}</span></td>
-        </tr>
-      `).join('');
-    }} else if (cTbody) {{
-      cTbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: #666; padding: 12px;">Run <code>cargo run -- --experiment contention</code> to populate write-lock contention benchmarks.</td></tr>';
-    }}
-
-    const sTbody = document.getElementById('saturation-tbody');
-    if (sTbody && saturationData.length > 0) {{
-      sTbody.innerHTML = saturationData.map(s => `
-        <tr>
-          <td><b>${{s.validator_name}}</b></td>
-          <td><code>${{s.client_type}}</code></td>
-          <td><b>N = ${{s.density_tier}}</b></td>
-          <td>${{s.landing_rate_pct.toFixed(1)}}%</td>
-          <td><b>${{s.spearman_fee > 0 ? '+' : ''}}${{s.spearman_fee.toFixed(3)}}</b></td>
-          <td>${{s.mean_index_in_block.toFixed(1)}}</td>
-          <td>${{s.slot_spread}}</td>
-          <td>${{s.saturation_assessment}}</td>
-        </tr>
-      `).join('');
-    }} else if (sTbody) {{
-      sTbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: #666; padding: 12px;">Run <code>cargo run -- --experiment saturation</code> to populate queue saturation benchmarks.</td></tr>';
-    }}
-
-    const figCaptions = {{
-      fig1: "Figure 1: Compute Unit Price (uL/CU) vs Confirmed Block Index Placement Percentile across Client Software.",
-      fig2: "Figure 2: Empirical Descending Fee burst trajectories proving Priority Fee overrides FIFO arrival order.",
-      fig3: "Figure 3: Spearman Rank Correlation (rho_fee) and Kendall's Tau across Mainnet Validators.",
-      fig4: "Figure 4: Monte Carlo Permutation Test (1,000 trials) proving observed ordering is not random noise (p < 0.001)."
-    }};
-    function showFig(name) {{
-      const files = {{
-        fig1: 'figures/fig1_fee_vs_position.png',
-        fig2: 'figures/fig2_fifo_vs_fee_inversion.png',
-        fig3: 'figures/fig3_client_strictness.png',
-        fig4: 'figures/fig4_permutation_test.png'
-      }};
-      document.getElementById('active-fig').src = files[name];
-      document.getElementById('fig-caption').innerText = figCaptions[name];
-    }}
-
-    const tbody = document.getElementById('val-table');
-    tbody.innerHTML = results.map(r => {{
-      let badgeClass = 'badge-agave';
-      if (r.client_type === 'JitoSolana') badgeClass = 'badge-jito';
-      else if (r.client_type === 'Firedancer') badgeClass = 'badge-firedancer';
-      else if (r.client_type === 'AgaveBam') badgeClass = 'badge-bam';
-
-      const sampleBurst = bursts.find(b => b.target_validator_identity === r.validator_identity && b.txs && b.txs.length > 0);
-      const sampleTx = sampleBurst && sampleBurst.txs ? sampleBurst.txs[0] : null;
-      const sigDisplay = sampleTx ? sampleTx.signature.substring(0, 8) + '...' : 'N/A';
-      const explorerUrl = sampleTx ? `https://explorer.solana.com/tx/${{sampleTx.signature}}` : '#';
-
-      return `
-        <tr>
-          <td><b>${{r.validator_name}}</b><br><span style="font-size:9px; color:#555;">${{r.validator_identity.substring(0, 16)}}...</span></td>
-          <td><span class="stat-badge ${{badgeClass}}">${{r.client_type}}</span></td>
-          <td><code>${{r.version_string}}</code></td>
-          <td>${{r.total_bursts_analyzed}}</td>
-          <td>${{r.overall_landing_rate_pct.toFixed(1)}}%</td>
-          <td><b>${{r.avg_spearman_fee > 0 ? '+' : ''}}${{r.avg_spearman_fee.toFixed(3)}}</b></td>
-          <td>${{r.avg_kendall_tau_fee.toFixed(3)}}</td>
-          <td>${{r.final_ordering_rule}}</td>
-          <td><b style="color: ${{r.rule_strictness_score > 0.8 ? '#008000' : '#804000'}}">${{(r.rule_strictness_score * 100).toFixed(0)}}%</b></td>
-          <td><a href="${{explorerUrl}}" target="_blank" rel="noopener noreferrer" style="color: #000080; font-weight: bold; text-decoration: underline;" title="Inspect on Solana Explorer">🔗 ${{sigDisplay}}</a></td>
-        </tr>
-      `;
-    }}).join('');
-
-    const chart = document.getElementById('bar-chart');
-    chart.innerHTML = results.map(r => {{
-      const height = Math.max(10, Math.round(r.rule_strictness_score * 150));
-      let color = '#00ff88';
-      if (r.client_type === 'Firedancer') color = '#ff9900';
-      if (r.client_type === 'Agave') color = '#3399ff';
-      return `
-        <div class="bar-col" style="height: ${{height}}px; background: ${{color}};">
-          <div style="position: absolute; top: -16px; width: 100%; font-weight: bold; color: #fff;">
-            ${{(r.rule_strictness_score * 100).toFixed(0)}}%
-          </div>
-          <div style="position: absolute; bottom: 2px; width: 100%; color: #000; font-weight: bold;">
-            ${{r.client_type.substring(0, 4)}}
-          </div>
-        </div>
-      `;
-    }}).join('');
-
-    // --- In-Browser Live RPC Verifier Modal Logic ---
-    function openLiveVerificationModal() {{
-      document.getElementById('verify-modal').style.display = 'flex';
-      renderAuditTableInitial();
-    }}
-
-    function closeLiveVerificationModal() {{
-      document.getElementById('verify-modal').style.display = 'none';
-    }}
-
-    function renderAuditTableInitial() {{
-      const auditTbody = document.getElementById('live-audit-tbody');
-      auditTbody.innerHTML = results.map((r, idx) => {{
-        const b = bursts.find(item => item.target_validator_identity === r.validator_identity && item.txs && item.txs.length > 0);
-        const tx = b && b.txs ? b.txs[0] : null;
-        const sig = tx ? tx.signature : 'N/A';
-        const slot = tx ? tx.landed_in_slot : (b ? b.target_slot : 'N/A');
-        const sigShort = sig.length > 16 ? sig.substring(0, 10) + '...' + sig.substring(sig.length - 6) : sig;
-
-        return `
-          <tr id="audit-row-${{idx}}">
-            <td><b>${{r.validator_name}}</b></td>
-            <td><code>${{r.client_type}}</code></td>
-            <td>${{slot}}</td>
-            <td><a href="https://explorer.solana.com/tx/${{sig}}" target="_blank" style="color: #000080; text-decoration: underline;">${{sigShort}}</a></td>
-            <td id="audit-status-${{idx}}" style="color: #666;">Ready to query</td>
-            <td><a href="https://explorer.solana.com/tx/${{sig}}" target="_blank" style="color: #000080;">Explorer ↗</a></td>
-          </tr>
-        `;
-      }}).join('');
-    }}
-
-    async function runLiveInBrowserAudit() {{
-      const rpcEndpoint = document.getElementById('rpc-endpoint-input').value.trim() || 'https://api.mainnet-beta.solana.com';
-      const statusText = document.getElementById('audit-status-text');
-      const pctText = document.getElementById('audit-pct-text');
-      const progressBar = document.getElementById('audit-progress-bar');
-      const summaryBadge = document.getElementById('audit-summary-badge');
-      const startBtn = document.getElementById('start-audit-btn');
-
-      startBtn.disabled = true;
-      statusText.innerText = "Connecting to Solana Mainnet (" + rpcEndpoint + ")...";
-      summaryBadge.innerHTML = '<span style="color:#000080;">⏳ Running live on-chain queries...</span>';
-
-      let verifiedCount = 0;
-      const total = results.length;
-
-      for (let i = 0; i < total; i++) {{
-        const r = results[i];
-        const b = bursts.find(item => item.target_validator_identity === r.validator_identity && item.txs && item.txs.length > 0);
-        const tx = b && b.txs ? b.txs[0] : null;
-        const statusCell = document.getElementById(`audit-status-${{i}}`);
-
-        if (!tx) continue;
-
-        statusCell.innerHTML = '<span style="color: #ff8800;">Querying RPC...</span>';
-        const startTime = Date.now();
-
-        try {{
-          let confirmed = false;
-          let confirmationStatus = 'confirmed';
-          let landedSlot = tx.landed_in_slot;
-
-          // Attempt direct browser fetch to RPC
-          try {{
-            const res = await fetch(rpcEndpoint, {{
-              method: 'POST',
-              headers: {{ 'Content-Type': 'application/json' }},
-              body: JSON.stringify({{
-                jsonrpc: '2.0',
-                id: i + 1,
-                method: 'getSignatureStatuses',
-                params: [[tx.signature], {{ searchTransactionHistory: true }}]
-              }})
-            }});
-
-            if (res.ok) {{
-              const json = await res.json();
-              if (json && json.result && json.result.value && json.result.value[0]) {{
-                confirmed = true;
-                confirmationStatus = json.result.value[0].confirmationStatus || 'confirmed';
-                landedSlot = json.result.value[0].slot || landedSlot;
-              }}
-            }}
-          }} catch (err) {{
-            // In case of direct CORS block, try /api/verify
-            try {{
-              const apiRes = await fetch('/api/verify', {{
-                method: 'POST',
-                headers: {{ 'Content-Type': 'application/json' }},
-                body: JSON.stringify({{ signatures: [tx.signature] }})
-              }});
-              if (apiRes.ok) {{
-                const apiJson = await apiRes.json();
-                if (apiJson && apiJson.result && apiJson.result.value && apiJson.result.value[0]) {{
-                  confirmed = true;
-                  confirmationStatus = apiJson.result.value[0].confirmationStatus || 'confirmed';
-                  landedSlot = apiJson.result.value[0].slot || landedSlot;
-                }}
-              }}
-            }} catch (e2) {{}}
-          }}
-
-          const elapsed = Date.now() - startTime;
-          statusCell.innerHTML = `<span style="color: #008000; font-weight: bold;">[OK] ${{confirmationStatus.toUpperCase()}}</span> <span style="font-size:9px; color:#555;">(Slot ${{landedSlot}}, ${{elapsed}}ms)</span>`;
-          verifiedCount++;
-        }} catch (e) {{
-          statusCell.innerHTML = `<span style="color: #008000; font-weight: bold;">[OK] CONFIRMED</span> <span style="font-size:9px; color:#555;">(Slot ${{tx.landed_in_slot}})</span>`;
-          verifiedCount++;
-        }}
-
-        const pct = Math.round(((i + 1) / total) * 100);
-        progressBar.style.width = pct + '%';
-        pctText.innerText = pct + '%';
-        statusText.innerText = `Verified ${{i + 1}}/${{total}} validator claims on-chain...`;
-        await new Promise(res => setTimeout(res, 80));
-      }}
-
-      startBtn.disabled = false;
-      statusText.innerText = `Audit completed: ${{verifiedCount}}/${{total}} validator signatures verified live!`;
-      summaryBadge.innerHTML = `<span style="color: #008000; font-weight: bold;">✅ [PASS] 7/7 Validators Confirmed Live on Solana Mainnet-Beta! (Spend Audit: ${{results[0] ? '0.001175 SOL <= 0.05 SOL' : ''}})</span>`;
-    }}
-
-    function renderAuditTableInitialTab() {{
-      const tabAuditTbody = document.getElementById('tab-live-audit-tbody');
-      if (!tabAuditTbody) return;
-      tabAuditTbody.innerHTML = results.map((r, idx) => {{
-        const b = bursts.find(item => item.target_validator_identity === r.validator_identity && item.txs && item.txs.length > 0);
-        const tx = b && b.txs ? b.txs[0] : null;
-        const sig = tx ? tx.signature : 'N/A';
-        const slot = tx ? tx.landed_in_slot : (b ? b.target_slot : 'N/A');
-        const sigShort = sig.length > 16 ? sig.substring(0, 10) + '...' + sig.substring(sig.length - 6) : sig;
-
-        return `
-          <tr id="tab-audit-row-${{idx}}">
-            <td><b>${{r.validator_name}}</b></td>
-            <td><code>${{r.client_type}}</code></td>
-            <td>${{slot}}</td>
-            <td><a href="https://explorer.solana.com/tx/${{sig}}" target="_blank" style="color: #000080; text-decoration: underline;">${{sigShort}}</a></td>
-            <td id="tab-audit-status-${{idx}}" style="color: #666;">Ready to query</td>
-            <td><a href="https://explorer.solana.com/tx/${{sig}}" target="_blank" style="color: #000080;">Explorer ↗</a></td>
-          </tr>
-        `;
-      }}).join('');
-    }}
-
-    async function runLiveInBrowserAuditTab() {{
-      const rpcEndpoint = document.getElementById('tab-rpc-endpoint-input').value.trim() || 'https://api.mainnet-beta.solana.com';
-      const statusText = document.getElementById('tab-audit-status-text');
-      const pctText = document.getElementById('tab-audit-pct-text');
-      const progressBar = document.getElementById('tab-audit-progress-bar');
-      const summaryBadge = document.getElementById('tab-audit-summary-badge');
-      const startBtn = document.getElementById('tab-start-audit-btn');
-
-      startBtn.disabled = true;
-      statusText.innerText = "Connecting to Solana Mainnet (" + rpcEndpoint + ")...";
-      summaryBadge.innerHTML = '<span style="color:#000080;">⏳ Running live on-chain queries...</span>';
-
-      let verifiedCount = 0;
-      const total = results.length;
-
-      for (let i = 0; i < total; i++) {{
-        const r = results[i];
-        const b = bursts.find(item => item.target_validator_identity === r.validator_identity && item.txs && item.txs.length > 0);
-        const tx = b && b.txs ? b.txs[0] : null;
-        const statusCell = document.getElementById(`tab-audit-status-${{i}}`);
-
-        if (!tx) continue;
-
-        statusCell.innerHTML = '<span style="color: #ff8800;">Querying RPC...</span>';
-        const startTime = Date.now();
-
-        try {{
-          let confirmed = false;
-          let confirmationStatus = 'confirmed';
-          let landedSlot = tx.landed_in_slot;
-
-          try {{
-            const res = await fetch(rpcEndpoint, {{
-              method: 'POST',
-              headers: {{ 'Content-Type': 'application/json' }},
-              body: JSON.stringify({{
-                jsonrpc: '2.0',
-                id: i + 1,
-                method: 'getSignatureStatuses',
-                params: [[tx.signature], {{ searchTransactionHistory: true }}]
-              }})
-            }});
-
-            if (res.ok) {{
-              const json = await res.json();
-              if (json && json.result && json.result.value && json.result.value[0]) {{
-                confirmed = true;
-                confirmationStatus = json.result.value[0].confirmationStatus || 'confirmed';
-                landedSlot = json.result.value[0].slot || landedSlot;
-              }}
-            }}
-          }} catch (err) {{
-            try {{
-              const apiRes = await fetch('/api/verify', {{
-                method: 'POST',
-                headers: {{ 'Content-Type': 'application/json' }},
-                body: JSON.stringify({{ signatures: [tx.signature] }})
-              }});
-              if (apiRes.ok) {{
-                const apiJson = await apiRes.json();
-                if (apiJson && apiJson.result && apiJson.result.value && apiJson.result.value[0]) {{
-                  confirmed = true;
-                  confirmationStatus = apiJson.result.value[0].confirmationStatus || 'confirmed';
-                  landedSlot = apiJson.result.value[0].slot || landedSlot;
-                }}
-              }}
-            }} catch (e2) {{}}
-          }}
-
-          const elapsed = Date.now() - startTime;
-          statusCell.innerHTML = `<span style="color: #008000; font-weight: bold;">[OK] ${{confirmationStatus.toUpperCase()}}</span> <span style="font-size:9px; color:#555;">(Slot ${{landedSlot}}, ${{elapsed}}ms)</span>`;
-          verifiedCount++;
-        }} catch (e) {{
-          statusCell.innerHTML = `<span style="color: #008000; font-weight: bold;">[OK] CONFIRMED</span> <span style="font-size:9px; color:#555;">(Slot ${{tx.landed_in_slot}})</span>`;
-          verifiedCount++;
-        }}
-
-        const pct = Math.round(((i + 1) / total) * 100);
-        progressBar.style.width = pct + '%';
-        pctText.innerText = pct + '%';
-        statusText.innerText = `Verified ${{i + 1}}/${{total}} validator claims on-chain...`;
-        await new Promise(res => setTimeout(res, 80));
-      }}
-
-      startBtn.disabled = false;
-      statusText.innerText = `Audit completed: ${{verifiedCount}}/${{total}} validator signatures verified live!`;
-      summaryBadge.innerHTML = `<span style="color: #008000; font-weight: bold;">✅ [PASS] 7/7 Validators Confirmed Live on Solana Mainnet-Beta! (Spend Audit: ${{results[0] ? '0.001175 SOL <= 0.05 SOL' : ''}})</span>`;
-    }}
-  </script>
-</body>
-</html>
-"#,
-            spent_sol = spent_sol,
-            cap_sol = cap_sol,
-            spend_pct = spend_pct,
-            rem_sol = rem_sol,
-            results_json = results_json,
-            bursts_json = bursts_json,
-            contention_json = contention_json,
-            sat_json = sat_json,
+            "Raw blocks: `{}` ({} block files)",
+            raw_dir.display(),
+            count
+        )
+    } else {
+        format!(
+            "Raw blocks: not saved in `{}`; per-transaction slot/index/fee/memo evidence is in `verification.json`.",
+            raw_dir.display()
         )
     }
+}
+
+fn spend_path(campaign: &Campaign) -> String {
+    if campaign.meta.execution_mode == crate::analyzer::ExecutionMode::Legacy {
+        return "(no v2 journal; spent fees reconstructed from measurements.json)".to_string();
+    }
+    campaign
+        .dir
+        .as_ref()
+        .map(|d| {
+            let local = d.join("spend_journal.jsonl");
+            if local.exists() {
+                local.display().to_string()
+            } else if campaign.meta.execution_mode == crate::analyzer::ExecutionMode::Live {
+                format!(
+                    "data/live/spend_journal.jsonl (global live journal; campaign dir {})",
+                    d.display()
+                )
+            } else {
+                local.display().to_string()
+            }
+        })
+        .unwrap_or_else(|| "data/live/spend_journal.jsonl".to_string())
+}
+
+fn render_html(
+    campaign: &Campaign,
+    analysis: &CampaignAnalysis,
+    verification: Option<&VerificationReport>,
+    spend: &crate::spend_tracker::SpendSummary,
+) -> String {
+    let mut html = String::new();
+    html.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
+    html.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+    html.push_str("<title>Solana Transaction Ordering — Same-Block Campaign</title>");
+    html.push_str("<style>");
+    html.push_str(
+        ":root{--bg:#f4f1e8;--ink:#141414;--muted:#5b5b55;--line:#c9c2b2;--accent:#0b6b5d;--warn:#8a3b12;--bad:#8b1e1e;--card:#fffdf6}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 Georgia,'Times New Roman',serif}header{background:#0b3b35;color:#f9f5e8;padding:28px 5vw 24px;border-bottom:6px double #d7b46a}h1{font-size:clamp(24px,4vw,44px);line-height:1.05;margin:0 0 10px;letter-spacing:-.02em}main{max-width:1280px;margin:0 auto;padding:28px 5vw 80px}.banner{border:2px solid var(--line);background:var(--card);padding:16px 18px;margin:0 0 24px;border-left:8px solid var(--accent)}.banner.legacy{border-left-color:var(--bad)}.banner.dryrun{border-left-color:var(--warn)}h2{margin:38px 0 10px;font-size:24px;border-bottom:1px solid var(--line);padding-bottom:6px}h3{margin:24px 0 8px}.meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:16px 0 8px}.meta div{border:1px solid var(--line);background:var(--card);padding:10px 12px}.meta b{display:block;font:11px/1.2 ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}table{width:100%;border-collapse:collapse;margin:12px 0 24px;font-size:13px;background:var(--card)}th,td{border:1px solid var(--line);padding:8px 9px;text-align:left;vertical-align:top}th{background:#e9e3d4;font:11px/1.2 ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase}td.num{text-align:right;font-variant-numeric:tabular-nums}code{font:12px/1.4 ui-monospace,monospace;background:#e9e3d4;padding:1px 4px;border-radius:2px}.ok{color:var(--accent);font-weight:bold}.bad{color:var(--bad);font-weight:bold}.warn{color:var(--warn);font-weight:bold}.muted{color:var(--muted)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}.card{border:1px solid var(--line);background:var(--card);padding:16px}.card h3{margin-top:0}.footer{margin-top:48px;border-top:1px solid var(--line);padding-top:16px;color:var(--muted);font-size:12px}@media(max-width:700px){th,td{font-size:12px;padding:6px}header{padding:20px 5vw}}"
+    );
+    html.push_str("</style></head><body><header>");
+    html.push_str("<h1>Solana Transaction Ordering</h1>");
+    html.push_str("<div>Same-block campaign report · v2 methodology</div></header><main>");
+
+    let banner_class = match campaign.meta.execution_mode {
+        crate::analyzer::ExecutionMode::Legacy => "banner legacy",
+        crate::analyzer::ExecutionMode::DryRun => "banner dryrun",
+        _ => "banner",
+    };
+    html.push_str(&format!("<div class=\"{banner_class}\">"));
+    html.push_str(&format!(
+        "<b>Campaign:</b> <code>{}</code><br><b>Mode:</b> <code>{}</code><br>",
+        esc(&campaign.meta.campaign_id),
+        campaign.meta.execution_mode
+    ));
+    html.push_str(&format!(
+        "<b>Target-block probes:</b> {} &nbsp; <b>Usable clusters:</b> {}<br>",
+        analysis.sample.target_block_probes, analysis.fee_target_block.blocks_used
+    ));
+    html.push_str(&format!(
+        "<b>Primary verdict:</b> {}</div>",
+        esc(&analysis.fee_target_block.verdict)
+    ));
+
+    html.push_str("<div class=\"meta\">");
+    html.push_str(&meta_card("Measured start", &campaign.meta.created_at_utc));
+    html.push_str(&meta_card(
+        "Measured finish",
+        campaign
+            .meta
+            .finished_at_utc
+            .as_deref()
+            .unwrap_or("not recorded"),
+    ));
+    html.push_str(&meta_card(
+        "Transport",
+        &campaign.meta.transport.to_string(),
+    ));
+    html.push_str(&meta_card(
+        "Payer mode",
+        &campaign.meta.payer_mode.to_string(),
+    ));
+    html.push_str(&meta_card(
+        "Send lead",
+        &format!("{} slot(s)", campaign.meta.send_lead_slots),
+    ));
+    html.push_str(&meta_card(
+        "Spend",
+        &format!(
+            "{:.9} / {:.9} SOL",
+            campaign.meta.total_spent_lamports as f64 / 1e9,
+            campaign.meta.spend_cap_lamports as f64 / 1e9
+        ),
+    ));
+    html.push_str("</div>");
+
+    html.push_str("<h2>1. Primary result: target-block ordering</h2>");
+    html.push_str("<p>The unit of inference is a block. Cross-block pairs are excluded. Ties in fee or send order are not counted as concordant. Intervals bootstrap whole blocks; p-values come from within-block label permutation.</p>");
+    html.push_str("<table><thead><tr><th>Comparison</th><th>Usable blocks</th><th>Usable pairs</th><th>Mean τb (95% CI)</th><th>Permutation p</th><th>Sign-test p</th><th>Verdict</th></tr></thead><tbody>");
+    for (label, stats) in [
+        ("Priority fee vs index", &analysis.fee_target_block),
+        ("Send order vs index", &analysis.send_target_block),
+    ] {
+        html.push_str(&format!(
+            "<tr><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}</td></tr>",
+            label,
+            stats.blocks_used,
+            stats.pairs_usable,
+            esc(&effect_cell(stats)),
+            p_cell(stats.permutation_p),
+            p_cell(stats.sign_test_p),
+            esc(&stats.verdict)
+        ));
+    }
+    html.push_str("</tbody></table>");
+
+    html.push_str("<h2>2. Sample accounting</h2>");
+    html.push_str("<table><thead><tr><th>Quantity</th><th>Count</th></tr></thead><tbody>");
+    for (label, value) in [
+        ("Bursts attempted", analysis.sample.total_bursts),
+        (
+            "Bursts with target-block probes",
+            analysis.sample.bursts_with_target_block_probes,
+        ),
+        (
+            "Bursts with target-window probes",
+            analysis.sample.bursts_with_target_window_probes,
+        ),
+        ("Probes sent", analysis.sample.total_probes_sent),
+        ("Probes landed", analysis.sample.total_probes_landed),
+        (
+            "Target-block probes (primary)",
+            analysis.sample.target_block_probes,
+        ),
+        (
+            "Target-window probes (secondary)",
+            analysis.sample.target_window_probes,
+        ),
+        (
+            "Probes outside target window",
+            analysis.sample.out_of_window_probes,
+        ),
+        ("Late bursts", analysis.sample.late_bursts),
+    ] {
+        html.push_str(&format!(
+            "<tr><td>{}</td><td class=\"num\">{}</td></tr>",
+            label, value
+        ));
+    }
+    html.push_str("</tbody></table>");
+
+    html.push_str("<h2>3. Per-validator results</h2>");
+    html.push_str("<table><thead><tr><th>Validator</th><th>Client</th><th>Version</th><th>Bursts</th><th>Target probes</th><th>Fee τb</th><th>95% CI</th><th>p</th><th>Verdict</th></tr></thead><tbody>");
+    for validator in &analysis.per_validator {
+        html.push_str(&validator_row(validator));
+    }
+    html.push_str("</tbody></table>");
+
+    html.push_str("<h2>4. On-chain verification</h2>");
+    match verification {
+        Some(report) => {
+            html.push_str(&format!(
+                "<p class=\"{}\"><b>{}</b> — confirmed {}/{}, index {}/{}, fee {}/{}, leader {}/{}, failures {}</p>",
+                if report.passed() { "ok" } else { "warn" },
+                if report.passed() { "PASS" } else { "INCOMPLETE" },
+                report.confirmed,
+                report.total_signatures,
+                report.index_matched,
+                report.total_signatures,
+                report.fee_matched,
+                report.total_signatures,
+                report.leaders_matched,
+                report.leaders_checked,
+                report.failures.len()
+            ));
+            if !report.failures.is_empty() {
+                html.push_str("<table><thead><tr><th>Burst</th><th>Signature</th><th>Kind</th><th>Expected</th><th>Actual</th></tr></thead><tbody>");
+                for failure in report.failures.iter().take(20) {
+                    html.push_str(&format!(
+                        "<tr><td><code>{}</code></td><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                        esc(&failure.burst_id),
+                        esc(failure.signature.as_deref().unwrap_or("-")),
+                        esc(&failure.kind),
+                        esc(&failure.expected),
+                        esc(&failure.actual)
+                    ));
+                }
+                html.push_str("</tbody></table>");
+            }
+        }
+        None => html.push_str("<p class=\"warn\">No verification file. Run <code>--verify-only</code> before citing this campaign.</p>"),
+    }
+
+    html.push_str("<h2>5. Limitations / what went wrong</h2>");
+    if campaign.meta.execution_mode == crate::analyzer::ExecutionMode::Legacy {
+        html.push_str("<div class=\"card\"><p><b>Legacy v1 is not a valid within-block experiment.</b></p><ul><li>0 target-block probes; all probes landed after the first target slot.</li><li>Fee tiers collapsed into on-chain ties (e.g., 5001/5002/5003 lamports).</li><li>Timestamps were synthesized at 80 ms intervals; on-chain memo times differ.</li><li>Contention/saturation JSON were dry-run simulator output presented as empirical.</li><li>The roster contained an invalid validator identity.</li><li>The old report claimed p &lt; 0.001 and conclusive scheduling; this analysis does not reproduce that.</li></ul></div>");
+    } else if campaign.meta.execution_mode == crate::analyzer::ExecutionMode::DryRun {
+        html.push_str("<div class=\"card\"><p><b>Dry-run only.</b> Placements are synthetic. This validates the pipeline; it is not evidence about mainnet validators. No mainnet transaction was sent.</p></div>");
+    } else {
+        html.push_str("<div class=\"card\"><p>Observation is limited to inclusion and within-block order. The campaign does not observe scheduler internals, Jito bundles, or private order flow. A shared payer can add a fee-payer write-lock confound. Public RPC slot polling is not a precision clock.</p></div>");
+    }
+
+    if !analysis.warnings.is_empty() {
+        html.push_str("<h2>6. Machine-generated warnings</h2><ul>");
+        for warning in &analysis.warnings {
+            html.push_str(&format!("<li>{}</li>", esc(warning)));
+        }
+        html.push_str("</ul>");
+    }
+
+    html.push_str("<h2>7. Reproduction</h2>");
+    html.push_str("<pre><code>cargo run --release -- --analyze-only --campaign-dir data/legacy-v1\ncargo run --release -- --dry-run --patterns randomized,uniform\ncargo run --release -- --verify-only --campaign-dir data/campaigns/&lt;id&gt;</code></pre>");
+    let (cap, spent, sent, confirmed) = effective_spend(campaign, spend);
+    html.push_str(&format!(
+        "<h2>8. Spend</h2><table><tbody><tr><td>Cap</td><td class=\"num\">{} lamports</td></tr><tr><td>Spent (this campaign)</td><td class=\"num\">{} lamports</td></tr><tr><td>Reserved</td><td class=\"num\">{} lamports</td></tr><tr><td>Remaining under cap</td><td class=\"num\">{} lamports</td></tr><tr><td>Sent / confirmed</td><td class=\"num\">{} / {}</td></tr></tbody></table>",
+        cap,
+        spent,
+        if campaign.meta.execution_mode == crate::analyzer::ExecutionMode::Legacy { 0 } else { spend.reserved_lamports },
+        cap.saturating_sub(spent),
+        sent,
+        confirmed
+    ));
+    html.push_str("<div class=\"footer\">Generated by solana-validator-ordering v2. Data, raw blocks, and verification files are linked from the campaign directory. No claim in this report is stronger than the sample accounting supports.</div>");
+    html.push_str("</main></body></html>");
+    html
+}
+
+fn meta_card(label: &str, value: &str) -> String {
+    format!("<div><b>{}</b>{}</div>", esc(label), esc(value))
+}
+
+fn validator_row(validator: &ValidatorSameBlock) -> String {
+    format!(
+        "<tr><td><code>{}</code></td><td>{}</td><td><code>{}</code></td><td class=\"num\">{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td><td>{}</td><td class=\"num\">{}</td><td>{}</td></tr>",
+        esc(&validator.validator_identity),
+        esc(&validator.client_type.to_string()),
+        esc(&validator.version_string),
+        validator.total_bursts,
+        validator.target_block_probes,
+        opt_num(validator.fee.mean_block_tau_b, 3),
+        esc(&ci_cell(&validator.fee)),
+        p_cell(validator.fee.permutation_p),
+        esc(&validator.fee.verdict)
+    )
+}
+
+fn esc(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+#[allow(dead_code)]
+fn pattern_label(pattern: BurstPattern) -> String {
+    pattern.to_string()
+}
+
+#[allow(dead_code)]
+fn report_path_label(path: &Path) -> String {
+    path.display().to_string()
 }
