@@ -54,14 +54,20 @@ To understand how validators order transactions, one must analyze the path of a 
 The reference Agave validator processes transactions through `BankingStage`:
 - **Ingress**: Packets arrive via TPU (Transaction Processing Unit) over QUIC connections.
 - **Worker Channel Distribution**: Transactions are distributed across worker threads (typically 6–12 threads depending on CPU core count). Thread assignment is performed by hashing the transaction's writable account keys (`BankingStage::hash_transaction_accounts`).
-- **Concurrency Dynamic**: Transactions that touch completely independent accounts are dispatched to distinct threads and execute in parallel. The relative block position between two non-conflicting transactions is therefore governed by thread scheduling latency, CPU core affinity, and execution time.
-- **Conflict Serialization**: When two transactions declare the same account as writable (e.g., sharing the same fee-payer at index 0), they either route to the same thread or must wait for the Sealevel runtime `AccountLoader` to release the write lock, forcing sequential execution.
+- **Mathematical Scheduling Key**: Within each worker channel, Agave prioritizes transactions using an integer ratio with a $+1$ denominator offset to prevent division-by-zero:
+  $$\text{Priority}_{\text{Agave}} = \left\lfloor \frac{(R_{\text{prio}} + 2,500) \times 10^6}{C_{\text{sched}} + 1} \right\rfloor$$
+  where $R_{\text{prio}}$ represents the priority fee in lamports, and $C_{\text{sched}}$ represents the requested compute units / scheduling cost.
+- **Concurrency Dynamic**: Transactions touching independent accounts dispatch to distinct worker threads and execute in parallel. The relative block position between two non-conflicting transactions is therefore governed by thread scheduling latency, CPU core affinity, and execution time.
+- **Conflict Serialization**: When two transactions declare the same account as writable (e.g., sharing a fee-payer or a synthetic lock account), they serialize onto the same thread or await runtime `AccountLoader` lock release, forcing sequential execution.
 
 ### 1.2 Firedancer (Jump Crypto) Architecture
 Firedancer is a ground-up C implementation of the Solana validator, organized into isolated hardware-pinned tiles communicating via lock-free shared-memory ring buffers (`fd_mcache` / `fd_dcache`):
 - **`fd_quic`**: Ingests QUIC streams without kernel context switching.
 - **`fd_pack`**: The discrete transaction packing tile. Unlike Agave's multi-threaded channel queues, `fd_pack` maintains an explicit transaction priority heap. Transactions are indexed by priority fee density:
-  $$\text{CU Price} = \frac{\text{Priority Fee Lamports} \times 10^6}{\text{Requested Compute Units}}$$
+  $$\text{Priority}_{\text{Firedancer}} = \frac{R_{\text{prio}} + 2,500}{C_{\text{sched}}}$$
+- **The $+1$ Denominator Divergence (Micro-Fingerprinting)**: Because Agave adds $+1$ to $C_{\text{sched}}$ while Firedancer computes an exact floating-point/fixed-point ratio, pairs with near-identical fee densities (within $\sim 0.003\%$) rank in opposite order between Agave and Firedancer. For instance, with Probe A ($R=3,954, C=3,143$) and Probe B ($R=3,325, C=2,643$):
+  - Under Agave: $R_A / (C_A + 1) = 1.257633 > R_B / (C_B + 1) = 1.257564 \implies \text{Probe A precedes Probe B}$.
+  - Under Firedancer: $R_A / C_A = 1.2580337 < R_B / C_B = 1.2580401 \implies \text{Probe B precedes Probe A}$.
 - **Heap Eviction & Tie-Breaking**: When multiple transactions offer identical priority fees, `fd_pack` breaks ties deterministically based on ring buffer arrival indices. In saturated memory buffers, equal-fee packets exhibit reverse-arrival or FIFO drain behavior depending on buffer eviction policy.
 - **`fd_bank`**: Executes ordered transactions against the state database.
 
@@ -97,6 +103,12 @@ In our **Descending Fee bursts**, transaction $T_7$ was dispatched last but carr
 Under Solana's Sealevel runtime, the fee-payer account (account index 0) is inherently marked writable to deduct network fees.
 - When an experiment sends $N$ probes using a **single shared payer**, the validator cannot execute probe $k+1$ until probe $k$ has finished and released the fee-payer write lock.
 - In our contention benchmarks, shared-payer bursts experienced an average displacement of **$+10.5$ slots** across the leader window relative to independent payers, demonstrating that lock serialization must be controlled when measuring scheduling rules.
+
+### 2.3 Intra-Thread Single-Lock Serialization vs. Inter-Thread Sealevel Concurrency
+A critical experimental distinction in Solana validator ordering research is how transaction write-locks are structured:
+- **Intra-Thread Single-Lock Serialization**: Forcing all probe transactions to contend on a single shared writable account (e.g., a dummy "lock" account). Because Sealevel forbids concurrent execution of identical writable keys, the validator is forced to serialize these transactions onto a single worker thread queue. While this eliminates multi-threaded jitter and yields near-100% textbook sorting, it only measures **single-thread priority queue mechanics**, bypassing Solana's primary architectural feature: parallel Sealevel execution across 6–12 BankingStage channels.
+- **Inter-Thread Disjoint Concurrency (Our Model)**: By utilizing independent fee payers and disjoint account sets, probes distribute across BankingStage worker channels according to account pubkey hashing. This reflects **real-world mainnet block production**, where non-conflicting transactions execute concurrently across CPU cores, naturally introducing positional interleaving. 
+- **Methodological Synthesis**: Rather than discarding interleaved bursts as "noise" or forcing artificial single-thread serialization, our within-block Kendall $\tau_b$ and Monte Carlo permutation framework quantifies the underlying priority signal through the real physical noise of multi-threaded execution.
 
 ---
 
