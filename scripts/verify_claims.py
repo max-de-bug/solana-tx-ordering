@@ -172,6 +172,13 @@ def main():
     else:
         print(f"    -> [NOTE] Rate-limiting or endpoint latency encountered. Re-run with private RPC if available.")
 
+    print(f"\n[4] SCIENTIFIC METHODOLOGY & RESEARCH SYNTHESIS:")
+    print(f"    • Two Regimes of Block Building: Pre-Window Buffering (Fee Sort) vs In-Window Arrival (Micro-Batching)")
+    print(f"    • Real-World Sealevel Concurrency: Independent Payers vs Single-Lock Serialization (+10.5 slots)")
+    print(f"    • Multidimensional Cost Density: Reward per Cost R/C (CU Limit + Loaded Account Bytes)")
+    print(f"    • Academic Research Paper:       RESEARCH.md")
+    print(f"    • Interactive Web Dashboard:     https://solana-tx-ordering.vercel.app")
+
     print("=" * 80)
 
 if __name__ == "__main__":

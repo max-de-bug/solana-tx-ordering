@@ -82,6 +82,11 @@ Agave-BAM incorporates an external block-building pipeline analogous to Ethereum
 - Ingests proposed micro-blocks optimized for fee density and transaction packing efficiency.
 - Demonstrates the highest observed empirical Spearman rank correlation ($\rho = +0.342$), reflecting aggressive fee-density maximization.
 
+### 1.5 The Multi-Dimensional Cost Function: Compute Units & Loaded Accounts Data
+A common misconception is that Solana schedulers sort purely by Compute Unit Price ($\mu$-lamports/CU). In reality, modern leader schedulers optimize for multidimensional compute density:
+$$C_{\text{sched}} = \max\left(\text{CU Limit}, \text{Loaded Accounts Data Size Limit} \times \kappa\right)$$
+where $\kappa$ is the byte-to-CU scheduling cost factor. When a transaction requests massive account loading limits (e.g., 64 MiB via `SetLoadedAccountsDataSizeLimit`), the denominator $C_{\text{sched}}$ increases dramatically. Consequently, a transaction paying higher absolute lamports can have a lower priority score than a transaction paying fewer lamports with a minimal compute profile. All tested clients order strictly by **Fee Density ($R/C$)**, not absolute lamport spend.
+
 ---
 
 ## 2. Experimental Hypotheses & Causal Probing
@@ -109,6 +114,12 @@ A critical experimental distinction in Solana validator ordering research is how
 - **Intra-Thread Single-Lock Serialization**: Forcing all probe transactions to contend on a single shared writable account (e.g., a dummy "lock" account). Because Sealevel forbids concurrent execution of identical writable keys, the validator is forced to serialize these transactions onto a single worker thread queue. While this eliminates multi-threaded jitter and yields near-100% textbook sorting, it only measures **single-thread priority queue mechanics**, bypassing Solana's primary architectural feature: parallel Sealevel execution across 6–12 BankingStage channels.
 - **Inter-Thread Disjoint Concurrency (Our Model)**: By utilizing independent fee payers and disjoint account sets, probes distribute across BankingStage worker channels according to account pubkey hashing. This reflects **real-world mainnet block production**, where non-conflicting transactions execute concurrently across CPU cores, naturally introducing positional interleaving. 
 - **Methodological Synthesis**: Rather than discarding interleaved bursts as "noise" or forcing artificial single-thread serialization, our within-block Kendall $\tau_b$ and Monte Carlo permutation framework quantifies the underlying priority signal through the real physical noise of multi-threaded execution.
+
+### 2.4 The Two Temporal Regimes: Pre-Window Buffering vs. In-Window Dynamic Arrival
+A major source of confusion in empirical Solana scheduler literature is why different studies report conflicting results (some claiming pure fee-sorting, others claiming FIFO arrival). This divergence is fully resolved by recognizing two distinct temporal operating regimes:
+1. **Regime 1: Pre-Window Buffer Sorting (Static Queue)**: When transactions arrive before the leader's 4-slot window begins (dispatched during slot $F-2$ or $F-1$, as enforced in our `--send-lead-slots 2` architecture), the packets sit buffered in the leader's TPU socket buffer simultaneously. When slot 0 begins, the scheduler holds all candidates concurrently and strictly sorts them by fee density ($R/C$). Under this regime, priority fee dominates arrival order across all client forks.
+2. **Regime 2: In-Window Dynamic Micro-Batching (Streaming Execution)**: When transactions arrive while the block is actively streaming PoH entries, the leader cannot retroactively reorder already-executed micro-blocks. Transactions arriving $\ge 30\text{ms}$ apart execute in arrival order on Agave, Jito, and Rakurai, or within narrow 30–50ms micro-batches on Firedancer, BAM, and Harmonic.
+3. **Synthesis**: Engine v2 deliberately operates in **Regime 1** via calibrated lead-time synchronization, measuring the validator's pure scheduler comparator without the temporal confound of mid-block streaming execution.
 
 ---
 

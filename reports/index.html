@@ -425,7 +425,14 @@
             <p>&bull; <b>Jito-Solana:</b> Reserves the first transactions of each block for atomic bundles from its Block Engine, then falls back to fee-prioritized mempool processing.</p>
             <p>&bull; <b>Agave-BAM:</b> Incorporates an external builder optimization pipeline maximizing fee density per compute unit.</p>
             <br>
-            <h4 style="margin-bottom: 6px; color: #000080; font-size: 13px;">3. Full Research Documentation &amp; Post-Mortem</h4>
+            <h4 style="margin-bottom: 6px; color: #000080; font-size: 13px;">3. The Two Temporal Regimes of Solana Block Building</h4>
+            <p>&bull; <b>Regime 1: Pre-Window Buffering (Static Queue):</b> When transactions reach the leader before its 4-slot window begins (dispatched via our calibrated <code>--send-lead-slots 2</code> pipeline), the scheduler holds all candidate transactions concurrently. In this regime, fee density (Reward per Cost, R/C) strictly decides block ordering across all clients.</p>
+            <p>&bull; <b>Regime 2: In-Window Dynamic Arrival (Streaming Execution):</b> When transactions arrive mid-block while PoH entries are actively streaming, already-executed transactions cannot be retroactively reordered. Transactions arriving &ge;30ms apart execute in arrival order or 30&ndash;50ms micro-batches.</p>
+            <br>
+            <h4 style="margin-bottom: 6px; color: #000080; font-size: 13px;">4. Real-World Multi-Threading vs. Single-Lock Serialization</h4>
+            <p>Some competitor studies forced all test transactions to write-lock a single dummy account, arguing that without a shared lock parallel transactions "mean nothing." That turns a multi-threaded parallel blockchain into an artificial single-threaded queue! Our Engine v2 evaluates both: our contention benchmark demonstrates the <b>+10.5 slot displacement</b> of shared-payer locks, while our independent-payer suite measures <b>real-world Sealevel concurrency</b> across 6&ndash;12 BankingStage channels using within-block Kendall &tau;<sub>b</sub>.</p>
+            <br>
+            <h4 style="margin-bottom: 6px; color: #000080; font-size: 13px;">5. Full Research Documentation &amp; Post-Mortem</h4>
             <p>Read our academic paper: <a href="https://github.com/max-de-bug/solana-tx-ordering/blob/main/RESEARCH.md" target="_blank" style="color: #000080; font-weight: bold; text-decoration: underline;">RESEARCH.md &nearr;</a></p>
             <p>Read the full campaign report &amp; failure post-mortem: <a href="REPORT.md" target="_blank" style="color: #000080; font-weight: bold; text-decoration: underline;">REPORT.md &nearr;</a></p>
           </div>
