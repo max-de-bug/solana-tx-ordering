@@ -176,6 +176,7 @@ def main():
     print(f"    • Two Regimes of Block Building: Pre-Window Buffering (Fee Sort) vs In-Window Arrival (Micro-Batching)")
     print(f"    • Real-World Sealevel Concurrency: Independent Payers vs Single-Lock Serialization (+10.5 slots)")
     print(f"    • Multidimensional Cost Density: Reward per Cost R/C (CU Limit + Loaded Account Bytes)")
+    print(f"    • Fork Priority Divergence:     Knapsack Fee Density (R/C) vs Institutional Gross Fee (Σ Fee)")
     print(f"    • Academic Research Paper:       RESEARCH.md")
     print(f"    • Interactive Web Dashboard:     https://solana-tx-ordering.vercel.app")
 

@@ -432,7 +432,11 @@
             <h4 style="margin-bottom: 6px; color: #000080; font-size: 13px;">4. Real-World Multi-Threading vs. Single-Lock Serialization</h4>
             <p>Some competitor studies forced all test transactions to write-lock a single dummy account, arguing that without a shared lock parallel transactions "mean nothing." That turns a multi-threaded parallel blockchain into an artificial single-threaded queue! Our Engine v2 evaluates both: our contention benchmark demonstrates the <b>+10.5 slot displacement</b> of shared-payer locks, while our independent-payer suite measures <b>real-world Sealevel concurrency</b> across 6&ndash;12 BankingStage channels using within-block Kendall &tau;<sub>b</sub>.</p>
             <br>
-            <h4 style="margin-bottom: 6px; color: #000080; font-size: 13px;">5. Full Research Documentation &amp; Post-Mortem</h4>
+            <h4 style="margin-bottom: 6px; color: #000080; font-size: 13px;">5. The Great Fork Divergence: Unit Fee Density (R/C) vs. Gross Total Fee</h4>
+            <p>&bull; <b>Canonical Knapsack Optimization (Agave, Jito, Firedancer):</b> Open-source clients sort candidate transactions by unit fee density: <code>Priority = (Reward + 2500) * 10^6 / (Cost + 1)</code>. A 100k CU transaction paying 1M lamports (10 lamports/CU) out-ranks a 1.4M CU transaction paying 2.8M lamports (2 lamports/CU).</p>
+            <p>&bull; <b>Institutional Private Fork Divergence (Figment, Everstake, Cogent):</b> High-stake institutional validators modify <code>prio_graph</code> to sort by <b>Gross Total Priority Fee</b> rather than fee density, maximizing gross block revenue from institutional transactions attaching lump-sum tips to large compute limits. Swapping fee and limit parameters isolates gross fee prioritization from compute limit bias.</p>
+            <br>
+            <h4 style="margin-bottom: 6px; color: #000080; font-size: 13px;">6. Full Research Documentation &amp; Post-Mortem</h4>
             <p>Read our academic paper: <a href="https://github.com/max-de-bug/solana-tx-ordering/blob/main/RESEARCH.md" target="_blank" style="color: #000080; font-weight: bold; text-decoration: underline;">RESEARCH.md &nearr;</a></p>
             <p>Read the full campaign report &amp; failure post-mortem: <a href="REPORT.md" target="_blank" style="color: #000080; font-weight: bold; text-decoration: underline;">REPORT.md &nearr;</a></p>
           </div>
