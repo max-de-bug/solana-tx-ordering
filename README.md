@@ -5,6 +5,8 @@
 [![Rust 1.80+](https://img.shields.io/badge/Rust-1.80%2B-orange?style=flat&logo=rust)](https://rust-lang.org)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat&logo=docker)](https://docker.com)
 [![Live Dashboard](https://img.shields.io/badge/Live%20Dashboard-solana--tx--ordering.vercel.app-008080?style=flat)](https://solana-tx-ordering.vercel.app)
+[![Research Paper](https://img.shields.io/badge/Research%20Paper-RESEARCH.md-blue?style=flat)](RESEARCH.md)
+[![Campaign Report](https://img.shields.io/badge/Campaign%20Report-REPORT.md-darkgreen?style=flat)](reports/REPORT.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
@@ -19,6 +21,11 @@ This project implements an empirical measurement suite designed to answer:
 3. **Does client software fork dictate scheduling behavior?**
 
 All measurements were conducted on **Solana Mainnet-Beta** following the October 21 Alpenglow upgrade (Epoch 1076/1077/1078).
+
+📖 **Comprehensive Scientific Paper:** [**RESEARCH.md**](RESEARCH.md)  
+📑 **Empirical Post-Mortem & Campaign Report:** [**reports/REPORT.md**](reports/REPORT.md)  
+🌐 **Live Interactive Windows 95 Dashboard:** [**https://solana-tx-ordering.vercel.app**](https://solana-tx-ordering.vercel.app)  
+
 
 ---
 
@@ -277,11 +284,14 @@ curl -s -X POST -H "Content-Type: application/json" \
 ├── docker-compose.yml       # Reproducible profiles (dry-run, analyzer, live)
 ├── .gitignore               # Private key (*.json, id.json) and secret exclusions
 ├── README.md                # Systems engineering documentation & methodology
+├── RESEARCH.md              # Academic research paper & formal statistical methodology
 ├── api/
 │   └── verify.js            # Serverless CORS fallback for in-browser real-time verification
 ├── data/
 │   ├── measurements.json    # Complete raw Mainnet measurement dataset (216 txs)
-│   └── analysis.json        # Statistical scores, Spearman rho, Kendall tau
+│   ├── analysis.json        # Statistical scores, Spearman rho, Kendall tau
+│   ├── spend_journal.jsonl  # Append-only cryptographic spend audit trail
+│   └── verification.json    # Verified on-chain slot & index ledger
 ├── reports/
 │   ├── REPORT.md            # Comprehensive research report & "What Went Wrong" post-mortem
 │   ├── dashboard.html       # Windows 95 style interactive local dashboard
@@ -293,15 +303,20 @@ curl -s -X POST -H "Content-Type: application/json" \
 │   └── generate_plots.py        # Gnuplot 6.0 figure generation driver
 └── src/
     ├── main.rs              # CLI entrypoint, execution pipeline, and safety checks
+    ├── campaign.rs          # Leader-window campaign orchestrator & same-block execution
     ├── config.rs            # Clap CLI configuration and spend limits
-    ├── rpc.rs               # Solana JSON-RPC client (camelCase serde, getBlock)
-    ├── validator_info.rs    # Client fork classifier (Agave, Jito, Firedancer, BAM)
+    ├── experiments.rs       # Simulation runner and benchmark suite
     ├── leader_schedule.rs   # 4-slot window calculator & countdown synchronization
-    ├── tx_crafting.rs       # Controlled burst generator (independent & shared payers)
-    ├── spend_tracker.rs     # Thread-safe atomic spend cap gate (<= 0.05 SOL)
-    ├── analyzer.rs          # Statistical engine (Spearman rho, Kendall tau, Monte Carlo)
+    ├── payer.rs             # Multi-payer pool management (independent vs shared)
     ├── report.rs            # Markdown & Windows 95 style dashboard synthesizer
-    └── server.rs            # Embedded lightweight HTTP dashboard server (port 1995)
+    ├── rpc.rs               # Solana JSON-RPC client (camelCase serde, getBlock)
+    ├── server.rs            # Embedded lightweight HTTP dashboard server (port 1995)
+    ├── spend_tracker.rs     # Thread-safe atomic spend cap gate (<= 0.05 SOL)
+    ├── transport.rs         # Direct TPU QUIC / JSON-RPC dispatch engine
+    ├── tx_crafting.rs       # Controlled burst generator (independent & shared payers)
+    ├── validator_info.rs    # Client fork classifier (Agave, Jito, Firedancer, BAM)
+    ├── verify.rs            # On-chain block verification engine
+    └── analyzer.rs          # Statistical engine (Spearman rho, Kendall tau, Monte Carlo)
 ```
 
 ---
